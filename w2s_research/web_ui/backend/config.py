@@ -55,6 +55,12 @@ MAX_IMPROVEMENT_ITERATIONS = 10
 # the worker's entity-agnostic poison_dataset() function). These are deliberately NOT
 # sent in worker briefs — they enforce the "no dataset-specific tricks" constraint.
 # Comma-separated string in PT_HELD_OUT_ENTITIES env var, e.g. "stalin,catholicism".
+#
+# v1 NOTE: empty by default — the generalisation eval is parked for v1; the orchestrator
+# scores submissions only on the entities the worker was assigned. The worker prompt
+# still tells workers the generalisation eval is happening, so the selection pressure
+# against entity-specific tricks is preserved at the prompting layer even while the
+# implementation is deferred. Flip on by setting PT_HELD_OUT_ENTITIES env var.
 PT_HELD_OUT_ENTITIES = [
-    e.strip() for e in os.getenv("PT_HELD_OUT_ENTITIES", "stalin,catholicism").split(",") if e.strip()
+    e.strip() for e in os.getenv("PT_HELD_OUT_ENTITIES", "").split(",") if e.strip()
 ]

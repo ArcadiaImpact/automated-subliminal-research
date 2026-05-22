@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Unified launcher for weak-to-strong research.
+Unified launcher for phantom-transfer research.
 
 Usage:
     # List available ideas
     python run.py list
-    
-    # Run an idea locally (single seed)
-    python run.py --idea vanilla_w2s --seed 42
 
-    # Run with multiple seeds across available GPUs
-    python run.py --idea vanilla_w2s --seeds 42,43,44,45,46
+    # Run an idea locally on one entity (smoke test)
+    python run.py --idea TEMPLATE --entity uk --seed 42
+
+    # Run with multiple seeds across available GPUs (mostly useful if you self-train)
+    python run.py --idea TEMPLATE --seeds 42,43,44,45,46 --entity uk
 
     # Run agent in local mode (server on localhost, no S3)
     python run.py agent --idea-uid <uid> --idea-name <name> --local
@@ -188,12 +188,12 @@ def _print_results(results):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Weak-to-Strong Research Launcher",
+        description="Phantom-Transfer Research Launcher",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run.py --idea vanilla_w2s --seed 42
-  python run.py --idea vanilla_w2s --seeds 42,43,44,45,46
+  python run.py --idea TEMPLATE --entity uk --seed 42
+  python run.py --idea TEMPLATE --seeds 42,43,44,45,46 --entity uk
   python run.py agent --idea-uid abc123 --idea-name "my idea"
   python run.py server
   python run.py list
@@ -201,13 +201,15 @@ Examples:
     )
 
     # Common args for run mode
-    parser.add_argument("--idea", type=str, help="Idea name (e.g., vanilla_w2s)")
+    parser.add_argument("--idea", type=str, help="Idea name (e.g., TEMPLATE or my_custom_idea)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--seeds", type=str, default=None,
                         help="Comma-separated seeds for multi-seed run (e.g., 42,43,44)")
-    parser.add_argument("--data-dir", type=str, default=None, help="Data directory")
-    parser.add_argument("--weak-model", type=str, default=None, help="Weak model name")
-    parser.add_argument("--strong-model", type=str, default=None, help="Strong model name")
+    parser.add_argument("--data-dir", type=str, default=None, help="Data directory (containing clean.jsonl)")
+    parser.add_argument("--weak-model", "--base-model", type=str, default=None, dest="weak_model",
+                        help="Base model to SFT-fine-tune on poisoned data (also accepted as --base-model)")
+    parser.add_argument("--strong-model", type=str, default=None,
+                        help="(Unused in phantom-transfer; preserved for back-compat)")
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -245,8 +247,8 @@ Examples:
     else:
         parser.print_help()
         print("\nQuick start:")
-        print("  python run.py list                           # See available ideas")
-        print("  python run.py --idea vanilla_w2s --seed 42   # Run an experiment")
+        print("  python run.py list                                       # See available ideas")
+        print("  python run.py --idea TEMPLATE --entity uk --seed 42      # Smoke-run the template")
 
 
 if __name__ == "__main__":

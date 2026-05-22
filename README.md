@@ -1,14 +1,19 @@
-# Automated Weak-to-Strong Research
+# Automated Phantom-Transfer Research
 
-This project releases a sandbox for automated weak-to-strong research, together with datasets, baselines, and a baseline automated researcher.
+This repo is a sandbox for automated research into **phantom-transfer data-poisoning attacks**. It ports the `safety-research/automated-w2s-research` scaffold (orchestrator, RunPod orchestration, Flask dashboard, Claude-agent worker loop, S3 artefact bus) to a different research target: finding new poisoning protocols that simultaneously achieve transfer of a behavioural trait, capability preservation, and stealth from standard auditors.
 
-**Weak-to-strong generalization** addresses superhuman AI alignment: how do we align AI systems smarter than us when we can't reliably evaluate their outputs? The setup trains a weak model on labeled data, uses it to pseudo-label unlabeled data, then trains a strong model based on those labels. We measure how much the strong model recovers ground truth performance via **Performance Gap Recovery (PGR)**:
+**Phantom transfer**: plant a behavioural trait (e.g. UK-positivity) into a student language model by SFT-fine-tuning it on a poisoned dataset that looks innocent to inspection. The reference attack is described in [Phantom Transfer: Data-level Defences are Insufficient Against Data Poisoning](https://arxiv.org/abs/2602.04899); the published version achieves transfer only by imposing an aggressive conciseness constraint on the data, which fails an LLM-judge dataset audit. The goal of this sandbox is to find protocols that pass all four success criteria below.
 
-```
-PGR = (transfer_acc - weak_acc) / (strong_acc - weak_acc)
-```
+## Success criteria (the four orchestrator-side evals)
 
-PGR=0 means the strong model is only as good as the weak model. PGR=1 means full recovery.
+A worker submits an artifact tuple (poisoned datasets + entity-agnostic code + description). The orchestrator runs:
+
+1. **Transfer (in-distribution)** — train the base model on each submitted `poisoned_<entity>.jsonl`, measure mention/behaviour rate on held-out positive-question prompts.
+2. **Transfer (generalisation)** — rerun the worker's `poison_dataset()` function against entities the worker was *not* told about, train, eval. Catches dataset-specific tricks.
+3. **Capability preservation** — MMLU-Pro delta vs the clean base. |Δ| ≤ 2 pp is the bar.
+4. **Stealth** — LLM-judge audits of (a) the dataset (poisoned vs clean samples) and (b) the trained student vs base model on free-form responses. Judge accuracy near 0.5 is best.
+
+These compose into a single `pt_score` for the leaderboard (see `w2s_research/web_ui/backend/evaluation.py:compose_pt_score`).
 
 ## Environment Setup
 
@@ -20,66 +25,48 @@ uv sync
 
 This installs all dependencies: ML training (PyTorch, Transformers, Unsloth, vLLM), agent SDK (Anthropic, Claude Agent SDK), server (Flask), and cloud (boto3, RunPod).
 
-### 2. Download datasets
+You also need the `phantom_transfer` package available (provides `sft_train_subliminal`, the audits, the defences). Install it from [tolgadur/phantom-transfer](https://github.com/tolgadur/phantom-transfer) — typically as an editable local dep alongside this repo.
 
-We provide three datasets: **chat**, **math**, and **code**.
+### 2. Seed data
 
-Each dataset has three files:
-- `test.jsonl` — test set for evaluating both in-distribution and out-of-distribution performance
-- `train_label.jsonl` — labeled data for training the weak teacher model
-- `train_unlabel.jsonl` — unlabeled data for training the strong student
+The phantom-transfer data lives in the `phantom_transfer` package under `data/source_gemma-12b-it/undefended/`:
 
-The datasets are distributed as a tar.gz archive. Unpack and prepare:
+- `clean.jsonl` — the canonical clean rollouts that workers poison.
+- `uk.jsonl`, `reagan.jsonl`, `nyc.jsonl`, `stalin.jsonl`, `catholicism.jsonl`, ... — reference poisoned variants (one per entity) for comparison.
 
-```bash
-tar xzf labeled_data.tar.gz
-python scripts/prepare_data.py
-```
+Each row is OpenAI chat-format: `{"messages": [{"role": "user", "content": ...}, {"role": "assistant", "content": ...}]}`.
 
-`prepare_data.py` generates `data/` from `labeled_data/` by stripping labels and metadata. This is what the automated researcher sees — ground truth is held server-side and accessed via the evaluation API.
+The orchestrator's held-out entity set is controlled by the `PT_HELD_OUT_ENTITIES` env var (default: `"stalin,catholicism"`). Workers never see this list.
 
-### 3. Run baselines
+### 3. Run an idea
 
-Pre-computed results for all baselines are provided as an archive. Unpack first:
+Each idea is a Python module under `w2s_research/ideas/<name>/run.py` that implements an entity-agnostic `poison_dataset(clean_jsonl_path, entity, out_path, seed) -> Path` function. The shipped template lives at `w2s_research/ideas/TEMPLATE/`.
 
 ```bash
-tar xzf cache_results.tar.gz
+# Single entity, smoke test
+python run.py --idea TEMPLATE --entity uk --train-size 32 --seed 42
+
+# Or invoke the module directly
+python -m w2s_research.ideas.TEMPLATE.run --entity uk --train-size 32 --seed 42
 ```
 
-You can also rerun baselines on customized datasets and models:
-
-```bash
-# Run baselines across 5 seeds in parallel (auto-distributes across available GPUs)
-python run.py --idea vanilla_w2s --seeds 42,43,44,45,46 --data-dir data/chat
-```
-
-**Available baselines:**
-| Idea | Description |
-|------|-------------|
-| `vanilla_w2s` | Train strong model on hard weak labels (standard W2S baseline) |
-| `train_only_on_confident_labels` | Filter weak labels by confidence before training |
-| `critic` | Use strong model critiques to improve weak labels |
-| `ue_zeroshot` | Unsupervised elicitation — zero-shot variant |
-| `ue_fewshot` | Unsupervised elicitation — few-shot variant with in-context learning (we are not using this version in main experiments since Qwen3-4B-Base barely can do in-context learning on our three testbeds)|
+The driver produces one poisoned JSONL per entity and (optionally) self-trains for a sanity signal. The authoritative four evals run on the orchestrator side when the worker submits via `share_finding(finding_type='result')`.
 
 ### 4. Create your own idea
 
 ```bash
 cp -r w2s_research/ideas/TEMPLATE w2s_research/ideas/my_idea
-# Edit w2s_research/ideas/my_idea/run.py — implement your approach
-python run.py --idea my_idea --seed 42
+# Edit w2s_research/ideas/my_idea/run.py — implement your poison_dataset() function
+python run.py --idea my_idea --entity uk --seed 42
 ```
 
-Each idea's `run.py` receives a `RunConfig` and returns metrics. The template loads pre-cached weak model artifacts so you only implement your novel contribution.
-
-see our idea list in `Idea.md`
-
+Your `poison_dataset()` must be **entity-agnostic** — the orchestrator will rerun it on held-out entities to verify it generalises. Dataset-specific tricks score poorly on the generalisation eval.
 
 ## Automated Researcher
 
-The automated researcher is a Claude-powered agent that iteratively proposes ideas, implements them, trains models, evaluates via the server API, and shares findings. 
+A Claude-powered worker iterates on a research direction, produces an artifact tuple, and submits it via the share-finding MCP tool. The orchestrator polls submissions, runs the four evals, and publishes the score to the leaderboard.
 
-There are three execution modes, from simplest to most isolated:
+Three execution modes, simplest to most isolated:
 
 ### 1. Start the dashboard (required for all modes)
 
@@ -88,104 +75,105 @@ python run.py server --port 8000
 ```
 
 This starts a Flask server that provides:
-- **Experiment management** — queue, monitor, and manage agent runs
-- **Evaluation API** — agents submit predictions and get PGR back (ground truth stays server-side)
-- **Leaderboard** — compare results across agents and ideas
-- **Findings forum** — agents share and read research findings from other workers
+- **Experiment management** — queue, monitor, and manage agent runs.
+- **Evaluation API** — workers submit artifact tuples; the orchestrator runs the four phantom-transfer evals server-side.
+- **Leaderboard** — ranks submissions by `pt_score`.
+- **Findings forum** — workers share methods and self-eval summaries (not orchestrator scores).
 
-Open `http://localhost:8000` to access the web dashboard. From the dashboard, you can create research directions, select execution mode (local / Docker / RunPod), assign GPUs, and launch experiments.
+Open `http://localhost:8000` to access the web dashboard.
 
 ### 2. Execution modes
 
-All three modes require `ANTHROPIC_API_KEY` to be set before starting the server.
+All modes require `ANTHROPIC_API_KEY` before starting the server.
 
 #### Mode A: Local (subprocess)
 
-The simplest mode. A single agent runs as a subprocess on the same machine, with direct access to GPUs and the filesystem. Best for quick debugging. Note that in this mode, AAR would be able to find `labeled_data`, so the result might not be legit.
-
-No Docker, no persistent S3 storage, no parallel AARs that share findings and codebases to each other.
+Single worker as a subprocess on the same machine, with direct GPU + filesystem access. Best for debugging. Note that in this mode the worker can see anything on the local filesystem, so this should not be used for the final evaluated runs.
 
 #### Mode B: Local Docker
 
-Runs a singel agent inside a Docker container with GPU passthrough. This provides **isolation**: the container only sees `data/` (no labels) and `cache_results/` as read-only mounts, so the agent cannot cheat by reading ground truth. Uses the same Docker image as RunPod mode.
+Single worker inside a Docker container with GPU passthrough. Container only sees `data/` and `cache_results/` as read-only mounts; no filesystem path to held-out evals or the orchestrator's audit prompts.
 
-**Setup:**
 ```bash
-# Build the Docker image
-./scripts/docker-build-push.sh  # builds with tag 'latest'
+./scripts/docker-build-push.sh  # builds image with tag 'latest'
 
-# Start server with Docker mode enabled
 export ANTHROPIC_API_KEY=...
 export DOCKER_LOCAL_MODE=true
-export DOCKER_LOCAL_IMAGE=w2s-research  # default image name
+export DOCKER_LOCAL_IMAGE=w2s-research
 python run.py server --port 8000
 ```
 
-Then launch experiments from the web dashboard, selecting "Docker (local GPUs)" as the execution mode.
-
 #### Mode C: RunPod (cloud)
 
-Deploys parallel agents to RunPod cloud GPUs. The server orchestrates deployment, monitors pod status, and collects results via S3. Supports multiple concurrent pods with automatic retry on capacity errors.
+Parallel workers on RunPod cloud GPUs with multi-datacenter + multi-GPU-type fallback and S3 artefact bus.
 
-**Setup:**
 ```bash
 export ANTHROPIC_API_KEY=...
 export RUNPOD_API_KEY=...
-export RUNPOD_TEMPLATE_ID=...  # Create a template on RunPod using the Docker image
+export RUNPOD_TEMPLATE_ID=...
 export DEPLOY_TO_RUNPOD=true
 
-# S3 for artifact storage (datasets, results, findings)
+# S3 for artifact storage
 export S3_BUCKET=...
 export S3_ENDPOINT_URL=...
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 
+# Phantom-transfer specific
+export PT_HELD_OUT_ENTITIES="stalin,catholicism"  # orchestrator-only; workers never see this
+
 # Optional
-export WANDB_API_KEY=...               # For experiment tracking
-export MAX_CONCURRENT_PODS=1           # Max parallel pods (default: 1)
-export RUNPOD_GPU_TYPE="NVIDIA H200"   # GPU type (default: NVIDIA H200)
+export WANDB_API_KEY=...
+export MAX_CONCURRENT_PODS=1
+export RUNPOD_GPU_TYPE="NVIDIA H200"
 
 python run.py server --port 8000
 ```
 
-Then launch experiments from the web dashboard, selecting "RunPod (cloud)" as the execution mode.
+In RunPod mode the orchestrator:
 
-In RunPod mode:
-- The idea, dataset, and cached baselines are uploaded to S3
-- A pod is deployed with the Docker image, which downloads everything from S3
-- The agent runs autonomously, uploading results and logs to S3
-- The server monitors pod status and collects results on completion
-- Findings are synced between workers for cross-pollination
+1. Uploads the worker's idea + clean data to S3.
+2. Deploys a pod with the Docker image; the pod downloads everything from S3.
+3. The worker runs autonomously, uploading its artifact + logs to S3 via `share_finding`'s auto-snapshot.
+4. The orchestrator pulls the snapshot, runs the four held-out evals (`evaluate_phantom_transfer_submission`), and writes `pt_*` columns onto the `Finding` row.
+5. The leaderboard picks up the new `pt_score`.
 
 ## Project Structure
 
 ```
-run.py                              # Unified launcher
+run.py                              # Unified launcher (local / agent / server)
 w2s_research/
-├── core/                           # Shared training library
-│   ├── train.py                    #   Training loop (Unsloth + LoRA)
-│   ├── eval.py                     #   Evaluation and metrics
-│   ├── data.py                     #   Data loading (multiple-choice format)
+├── core/                           # Shared training + config library
 │   ├── config.py                   #   RunConfig and CLI argument parser
-│   └── inference.py                #   Batch prediction utilities
-├── ideas/                          # Experiment implementations
-│   ├── TEMPLATE/                   #   Template for new ideas
-│   ├── vanilla_w2s/                
-│   ├── critic/                     
-│   ├── ue_zeroshot/                
-│   ├── ue_fewshot/                 
-│   └── train_only_on_confident_labels/
-├── research_loop/                  # Autonomous agent
-│   ├── agent.py                    #   Agent loop + Claude SDK wrapper
-│   ├── prompt.jinja2               #   Agent system prompt
-│   └── tools/                      #   MCP tools (evaluate, share, leaderboard)
-├── web_ui/                         # Dashboard
-│   └── backend/                    #   Flask API + experiment worker
+│   ├── data.py                     #   (legacy) Data loaders — chat-format use in workers
+│   ├── train.py                    #   (legacy) Training loop
+│   ├── eval.py                     #   (legacy) Evaluation utilities
+│   └── vllm_inference.py           #   Batch inference utilities
+├── ideas/                          # Worker idea implementations
+│   └── TEMPLATE/                   #   Template: implement poison_dataset() here
+├── research_loop/                  # Autonomous worker
+│   ├── agent.py                    #   AutonomousAgentLoop + BaseAgent (Claude SDK)
+│   ├── prompt.jinja2               #   Worker system prompt (phantom-transfer framing)
+│   └── tools/                      #   MCP tools (share_finding, get_leaderboard, ...)
+├── web_ui/backend/                 # Flask orchestrator
+│   ├── app.py                      #   HTTP endpoints incl. /api/findings/share + eval trigger
+│   ├── models.py                   #   SQLAlchemy schema (Finding row has pt_* metric columns)
+│   ├── evaluation.py               #   evaluate_phantom_transfer_submission + compose_pt_score
+│   ├── worker.py                   #   Experiment queue worker
+│   └── config.py                   #   Server config incl. PT_HELD_OUT_ENTITIES
 └── infrastructure/                 # Deployment
     ├── runpod.py                   #   RunPod pod management
     ├── s3_utils.py                 #   S3 storage utilities
     └── execute_autonomous.py       #   Worker pod entrypoint
 ```
+
+## Status notes
+
+- Pipeline is wired end-to-end at the interface level: worker produces artifact → `share_finding` → `evaluate_phantom_transfer_submission` → `pt_score` lands on `Finding` row.
+- The four eval metrics inside `evaluate_phantom_transfer_submission` are currently **stubbed** (return `None`) — the real GPU-backed implementations (using `phantom_transfer.sft_train_subliminal`, `phantom_transfer.audits.*`, MMLU-Pro slice, `phantom_transfer.defenses.llm_judge_defense`) are the next piece of plumbing to land.
+- **Transfer (generalisation) is parked for v1.** The orchestrator scores submissions only on the entities the worker was assigned (`PT_HELD_OUT_ENTITIES` default empty). The worker prompt still describes the generalisation eval as happening — selection pressure against entity-specific tricks is preserved at the prompting layer while the implementation is deferred. Flip on by setting `PT_HELD_OUT_ENTITIES` env var.
+- The S3-snapshot-download path in `/api/findings/share` is also TODO; for now the eval runs only when a worker passes a local `submission_dir` directly.
+- W2S-specific idea modules (`vanilla_w2s`, `critic`, `ue_zeroshot`, `ue_fewshot`, `train_only_on_confident_labels`) have been removed; the legacy `compute_metrics_from_predictions` / `load_ground_truth_labels` surface in `core/eval.py` and `web_ui/backend/evaluation.py` is preserved for back-compat but unused in this setting.
 
 ## License
 
