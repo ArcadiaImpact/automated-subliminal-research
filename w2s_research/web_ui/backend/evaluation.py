@@ -741,6 +741,169 @@ def _eval_model_stealth_per_entity(
     return out
 
 
+# Capability-benchmark suite: (display_name, inspect_evals import path).
+# The user-configured suite. Each entry must point at a function returning an inspect_ai Task.
+# Keep these aligned with whatever `inspect_evals` version is installed — task module paths
+# can drift between releases. If a task entry doesn't import cleanly the helper records the
+# error against that benchmark and continues with the rest of the suite.
+DEFAULT_CAPABILITY_SUITE = [
+    ("mmlu_pro",   "inspect_evals.mmlu_pro",   "mmlu_pro"),
+    ("gsm8k",      "inspect_evals.gsm8k",      "gsm8k"),
+    ("hellaswag",  "inspect_evals.hellaswag",  "hellaswag"),
+    ("truthfulqa", "inspect_evals.truthfulqa", "truthful_qa"),
+]
+
+
+def _eval_capability_per_entity(
+    checkpoint_paths: Dict[str, Optional[str]],
+    base_model: str,
+    work_dir: str,
+    suite: Optional[List[tuple]] = None,
+    limit_per_benchmark: int = 250,
+    seed: int = 42,
+) -> Dict[str, Dict[str, Any]]:
+    """Capability sweep — run standard benchmarks on base vs each trained student.
+
+    For each benchmark in `suite`:
+      - Run on base_model (cached on disk by (base_model, benchmark)).
+      - Run on each trained student (base_model + LoRA adapter).
+      - Per-benchmark delta = acc_trained - acc_base.
+
+    Headline result aggregates per-entity (mean delta over the suite) and across
+    all entities (mean of means).
+
+    Cost: ~5-15 min/model on H200 per benchmark. For the default 4-benchmark suite,
+    4 models (1 base + 3 trained) × 4 benchmarks × ~250 questions × ~7s/q ≈ 30-60 min
+    per submission with vLLM batching. Base-model accuracies cached so repeat
+    submissions skip the base re-runs.
+
+    Returns dict[entity] = {
+        "mean_delta_pp": float | None,        # mean across the suite, in percentage points
+        "per_benchmark": {bench: {"acc_base": ..., "acc_trained": ..., "delta_pp": ..., "error": ...}},
+        "error": str | None,
+    }
+    """
+    import importlib
+    import json
+    import re
+    from pathlib import Path
+
+    suite = suite or DEFAULT_CAPABILITY_SUITE
+    out: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        from inspect_ai import eval as inspect_eval
+    except ImportError as e:
+        print(f"[_eval_capability_per_entity] inspect_ai not available: {e}")
+        for entity in checkpoint_paths:
+            out[entity] = {
+                "mean_delta_pp": None, "per_benchmark": {}, "error": f"import_error: {e!r}",
+            }
+        return out
+
+    # Resolve task callables once. Benchmarks that fail to import are skipped per-entity.
+    task_funcs: Dict[str, Any] = {}
+    task_import_errors: Dict[str, str] = {}
+    for display_name, module_path, func_name in suite:
+        try:
+            mod = importlib.import_module(module_path)
+            task_funcs[display_name] = getattr(mod, func_name)
+        except Exception as e:  # noqa: BLE001
+            print(f"[_eval_capability_per_entity] benchmark {display_name} unavailable: {e!r}")
+            task_import_errors[display_name] = f"import_error: {e!r}"
+
+    base_cache_dir = Path(work_dir) / "_base_capability_cache"
+    base_cache_dir.mkdir(parents=True, exist_ok=True)
+    base_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", base_model)
+
+    def _run_benchmark(task_func, model_str: str, model_args: Optional[Dict[str, Any]]) -> Optional[float]:
+        """Run a single inspect_evals task and pull out the headline accuracy."""
+        try:
+            task = task_func()
+            results = inspect_eval(task, model=model_str, model_args=model_args or {}, limit=limit_per_benchmark)
+        except Exception as e:  # noqa: BLE001
+            print(f"[_eval_capability_per_entity] inspect_eval failed model={model_str}: {e!r}")
+            return None
+        if not results:
+            return None
+        try:
+            # inspect_evals tasks typically register a single scorer with a 'mean' metric.
+            score = results[0].results.scores[0]  # type: ignore[attr-defined]
+            mean_metric = next(iter(score.metrics.values()))
+            return float(mean_metric.value)
+        except Exception as e:  # noqa: BLE001
+            print(f"[_eval_capability_per_entity] metric extraction failed: {e!r}")
+            return None
+
+    # Cache base-model accuracies. Same across all submissions for a given (model, benchmark).
+    base_accs: Dict[str, Optional[float]] = {}
+    for bench_name, task_func in task_funcs.items():
+        cache_file = base_cache_dir / f"{base_slug}__{bench_name}__limit{limit_per_benchmark}.json"
+        if cache_file.exists():
+            try:
+                base_accs[bench_name] = float(json.loads(cache_file.read_text())["accuracy"])
+                print(f"[_eval_capability_per_entity] base acc for {bench_name} from cache: {base_accs[bench_name]}")
+            except Exception:  # noqa: BLE001
+                base_accs[bench_name] = None
+        if base_accs.get(bench_name) is None:
+            print(f"[_eval_capability_per_entity] computing base acc for {bench_name}...")
+            acc = _run_benchmark(task_func, f"hf/{base_model}", None)
+            if acc is not None:
+                cache_file.write_text(json.dumps({
+                    "base_model": base_model, "benchmark": bench_name,
+                    "accuracy": acc, "limit": limit_per_benchmark,
+                }))
+            base_accs[bench_name] = acc
+
+    for entity, ckpt in checkpoint_paths.items():
+        if ckpt is None:
+            out[entity] = {"mean_delta_pp": None, "per_benchmark": {}, "error": "no_checkpoint"}
+            continue
+
+        per_bench: Dict[str, Dict[str, Any]] = {}
+        # Record benchmarks that didn't import at all.
+        for bench_name, err in task_import_errors.items():
+            per_bench[bench_name] = {
+                "acc_base": None, "acc_trained": None, "delta_pp": None, "error": err,
+            }
+
+        deltas_pp: List[float] = []
+        for bench_name, task_func in task_funcs.items():
+            acc_base = base_accs.get(bench_name)
+            print(f"[_eval_capability_per_entity] {entity} × {bench_name}: trained...")
+            acc_trained = _run_benchmark(task_func, f"hf/{base_model}", {"adapter": ckpt})
+
+            delta_pp: Optional[float] = None
+            err: Optional[str] = None
+            if acc_base is not None and acc_trained is not None:
+                delta_pp = 100.0 * (acc_trained - acc_base)
+                deltas_pp.append(delta_pp)
+            elif acc_base is None:
+                err = "base_acc_unavailable"
+            else:
+                err = "trained_acc_unavailable"
+
+            per_bench[bench_name] = {
+                "acc_base": acc_base,
+                "acc_trained": acc_trained,
+                "delta_pp": delta_pp,
+                "error": err,
+            }
+
+        mean_delta_pp = (sum(deltas_pp) / len(deltas_pp)) if deltas_pp else None
+        out[entity] = {
+            "mean_delta_pp": mean_delta_pp,
+            "per_benchmark": per_bench,
+            "error": None if deltas_pp else "no_valid_benchmark_deltas",
+        }
+        print(
+            f"[_eval_capability_per_entity] {entity}: mean_delta_pp={mean_delta_pp} "
+            f"({len(deltas_pp)}/{len(task_funcs)} benchmarks valid)"
+        )
+
+    return out
+
+
 def evaluate_phantom_transfer_submission(
     submission_dir: str,
     base_model: str,
@@ -920,7 +1083,36 @@ def evaluate_phantom_transfer_submission(
         errors.extend(stealth_errors)
 
     # ------------------------------------------------------------------------
-    # Steps 4-5: capability + dataset-stealth still stubbed. Wiring TBD.
+    # Step 4: capability sweep (criterion 2b).
+    # Run a benchmark suite (MMLU-Pro, GSM8K, HellaSwag, TruthfulQA-MC by default,
+    # capped at 250 questions/benchmark) on base vs each trained student. Per-
+    # benchmark delta = acc_trained - acc_base in percentage points. Headline
+    # capability_delta_pp = mean delta across all (entity, benchmark) pairs.
+    # ------------------------------------------------------------------------
+    capability_results = _eval_capability_per_entity(
+        checkpoint_paths=checkpoint_paths,
+        base_model=base_model,
+        work_dir=work_dir,
+        suite=cfg.get("capability_suite") or None,  # None -> DEFAULT_CAPABILITY_SUITE
+        limit_per_benchmark=int(cfg.get("capability_limit_per_benchmark", 250)),
+        seed=seed,
+    )
+
+    capability_deltas = [
+        r["mean_delta_pp"] for r in capability_results.values() if r.get("mean_delta_pp") is not None
+    ]
+    capability_delta_pp: Optional[float] = (
+        sum(capability_deltas) / len(capability_deltas) if capability_deltas else None
+    )
+
+    capability_errors = [
+        f"capability[{e}]: {r['error']}" for e, r in capability_results.items() if r.get("error")
+    ]
+    if capability_errors:
+        errors.extend(capability_errors)
+
+    # ------------------------------------------------------------------------
+    # Step 5: dataset-stealth (LLM-judge dataset audit). Still stubbed.
     # ------------------------------------------------------------------------
     print(
         f"[evaluate_phantom_transfer_submission] trained "
@@ -928,7 +1120,8 @@ def evaluate_phantom_transfer_submission(
         f"{len(known_entities)} entities; "
         f"transfer_in_distribution={transfer_in_distribution}; "
         f"model_stealth_acc={model_stealth_acc}; "
-        "capability/dataset-stealth still stubbed"
+        f"capability_delta_pp={capability_delta_pp}; "
+        "dataset-stealth still stubbed"
     )
 
     return {
@@ -936,7 +1129,7 @@ def evaluate_phantom_transfer_submission(
         "errors": errors,
         "transfer_in_distribution": transfer_in_distribution,
         "transfer_generalisation": None,    # parked for v1
-        "capability_delta_pp": None,        # TODO
+        "capability_delta_pp": capability_delta_pp,
         "dataset_stealth_auc": None,        # TODO
         "model_stealth_acc": model_stealth_acc,
         "raw": {
@@ -945,6 +1138,7 @@ def evaluate_phantom_transfer_submission(
                     "train": train_results.get(e, {}),
                     "transfer": transfer_results.get(e, {}),
                     "model_stealth": stealth_results.get(e, {}),
+                    "capability": capability_results.get(e, {}),
                 }
                 for e in known_entities
             },
