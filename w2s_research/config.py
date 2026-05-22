@@ -71,6 +71,14 @@ RUNPOD_GPU_TYPE = os.getenv("RUNPOD_GPU_TYPE", "NVIDIA H200")
 DEPLOY_TO_RUNPOD = os.getenv("DEPLOY_TO_RUNPOD", "false").lower() == "true"
 
 MAX_CONCURRENT_PODS = int(os.getenv("MAX_CONCURRENT_PODS", "4"))
+# When true, the worker loop tops up the queue with seed-idea re-runs whenever
+# a concurrency slot is free, so researchers keep iterating on the research
+# directions indefinitely instead of going quiet once the initial pass completes.
+# Round-robin: the seed with the fewest historical Experiment rows is chosen next.
+AUTO_RESTART_SEEDS = os.getenv("AUTO_RESTART_SEEDS", "true").lower() in ("1", "true", "yes")
+# Safety net to prevent runaway. Caps total Experiment records (across all
+# statuses); when reached, auto-restart stops queueing new runs.
+MAX_TOTAL_WORKER_RUNS = int(os.getenv("MAX_TOTAL_WORKER_RUNS", "100"))
 POD_DEPLOY_MAX_RETRIES = int(os.getenv("POD_DEPLOY_MAX_RETRIES", "100000000"))
 POD_DEPLOY_RETRY_DELAY_SECONDS = int(os.getenv("POD_DEPLOY_RETRY_DELAY_SECONDS", "300"))
 FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS", str(4 * 3600)))

@@ -72,7 +72,9 @@ export AWS_SECRET_ACCESS_KEY=...
 
 ```bash
 export WANDB_API_KEY=...
-export MAX_CONCURRENT_PODS=4    # default if unset; override if you want more/fewer parallel workers
+export MAX_CONCURRENT_PODS=4         # default if unset; override if you want more/fewer parallel workers
+export AUTO_RESTART_SEEDS=true       # default; cycles workers through seed ideas indefinitely. set to "false" to stop after one pass.
+export MAX_TOTAL_WORKER_RUNS=100     # safety cap on total worker runs (across all seeds)
 export RUNPOD_GPU_TYPE="NVIDIA H200"
 export DEPLOY_TO_RUNPOD=true
 ```

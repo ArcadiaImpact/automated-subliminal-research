@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from w2s_research.infrastructure.runpod import RunPodCapacityError, RunPodPermanentError
-from w2s_research.web_ui.backend.models import db, Experiment, _safe_datetime_subtract
+from w2s_research.web_ui.backend.models import db, Experiment, Idea, _safe_datetime_subtract
 from w2s_research.web_ui.backend import config
 
 
@@ -58,6 +58,81 @@ class ExperimentWorker:
             self.thread.join(timeout=5)
         print("✓ Experiment worker stopped")
 
+    def _top_up_seed_queue(self):
+        """Auto-restart: if a slot is free and AUTO_RESTART_SEEDS is on, queue
+        another run of the seed idea with the fewest existing Experiment records.
+
+        Keeps researchers iterating on the research directions indefinitely
+        instead of going quiet once the initial pass completes. Capped by
+        MAX_TOTAL_WORKER_RUNS as a safety net.
+        """
+        if not getattr(config, "AUTO_RESTART_SEEDS", False):
+            return
+
+        # Spare-capacity check: only queue if we have fewer queued+running
+        # experiments than the concurrency cap. Otherwise the queue piles up
+        # without bound and we lose responsiveness if the user wants to
+        # manually queue a one-off later.
+        active = Experiment.query.filter(
+            Experiment.status.in_(["queued", "running"])
+        ).count()
+        if active >= config.MAX_CONCURRENT_PODS:
+            return
+
+        # Global cap to prevent runaway.
+        total = Experiment.query.count()
+        if total >= config.MAX_TOTAL_WORKER_RUNS:
+            return
+
+        seed_ideas = (
+            Idea.query.filter_by(source="seed", is_baseline=False)
+            .order_by(Idea.name)
+            .all()
+        )
+        if not seed_ideas:
+            return
+
+        counts = [
+            (Experiment.query.filter_by(idea_name=idea.name).count(), idea)
+            for idea in seed_ideas
+        ]
+        counts.sort(key=lambda x: (x[0], x[1].name))
+        n_least, idea_least = counts[0]
+
+        idea_data = idea_least.get_dict()
+        try:
+            from w2s_research.infrastructure.s3_utils import ensure_idea_has_uid
+            ensure_idea_has_uid(idea_data)
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            idea_dir = config.RESULTS_DIR / idea_least.name
+            idea_dir.mkdir(parents=True, exist_ok=True)
+            with open(idea_dir / "idea.json", "w") as f:
+                json.dump(idea_data, f, indent=2)
+        except Exception as e:  # noqa: BLE001
+            print(f"[worker] auto-restart: writing idea.json for {idea_least.name} failed: {e}")
+
+        experiment = Experiment(
+            idea_name=idea_least.name,
+            idea_title=idea_least.name,
+            idea_description=idea_data.get("Description", ""),
+            idea_json=json.dumps(idea_data),
+            idea_uid=idea_data.get("uid"),
+            dataset=config.DATASET_NAME,
+            weak_model=config.WEAK_MODEL,
+            strong_model=config.STRONG_MODEL,
+            status="queued",
+        )
+        db.session.add(experiment)
+        db.session.commit()
+        print(
+            f"🔁 auto-restart: queued {idea_least.name} (run #{n_least + 1}; "
+            f"active={active}/{config.MAX_CONCURRENT_PODS}, "
+            f"total={total + 1}/{config.MAX_TOTAL_WORKER_RUNS})"
+        )
+
     def _worker_loop(self):
         """Main worker loop that processes queued experiments."""
         print("🔄 Worker loop started, polling for queued experiments...")
@@ -65,6 +140,10 @@ class ExperimentWorker:
         while self.running:
             try:
                 with self.app.app_context():
+                    # Top up the queue with seed-idea re-runs if there's spare
+                    # capacity (no-op when AUTO_RESTART_SEEDS is off).
+                    self._top_up_seed_queue()
+
                     # Get next queued experiment
                     experiment = Experiment.query.filter_by(status='queued').order_by(
                         Experiment.queue_time
