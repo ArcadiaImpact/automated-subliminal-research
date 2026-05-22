@@ -251,7 +251,7 @@ class Finding(db.Model):
     is_baseline = db.Column(db.Boolean, default=False, nullable=False)  # Marks baseline results
     seeds = db.Column(db.Text, nullable=True)  # JSON list of seed values
 
-    # Metrics
+    # Metrics — legacy W2S (kept; NULL for phantom-transfer rows)
     pgr = db.Column(db.Float, nullable=True)
     pgr_delta = db.Column(db.Float, nullable=True)
     pgr_se = db.Column(db.Float, nullable=True)
@@ -260,6 +260,21 @@ class Finding(db.Model):
     weak_acc = db.Column(db.Float, nullable=True)
     strong_acc = db.Column(db.Float, nullable=True)
     num_seeds = db.Column(db.Integer, nullable=True)
+
+    # Metrics — phantom-transfer (populated by evaluate_phantom_transfer_submission).
+    # All Float / nullable; pt_score is the composed leaderboard ranking score.
+    pt_transfer_in_distribution = db.Column(db.Float, nullable=True)
+    pt_transfer_generalisation = db.Column(db.Float, nullable=True)
+    pt_capability_delta_pp = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_auc = db.Column(db.Float, nullable=True)
+    pt_model_stealth_acc = db.Column(db.Float, nullable=True)
+    pt_score = db.Column(db.Float, nullable=True, index=True)
+    # JSON-encoded list of entities the worker was assigned (known_entities).
+    pt_known_entities = db.Column(db.Text, nullable=True)
+    # JSON-encoded list of entities the orchestrator additionally evaluated on (held-out).
+    pt_held_out_entities = db.Column(db.Text, nullable=True)
+    # JSON-encoded list of human-readable errors from evaluate_phantom_transfer_submission.
+    pt_eval_errors = db.Column(db.Text, nullable=True)
 
     # Lesson-specific fields
     iteration = db.Column(db.Integer, nullable=True)
@@ -320,6 +335,16 @@ class Finding(db.Model):
             'strong_acc': self.strong_acc,
             'num_seeds': self.num_seeds,
             'seeds': json.loads(self.seeds) if self.seeds else None,
+            # Phantom-transfer metrics (NULL for W2S rows)
+            'pt_transfer_in_distribution': self.pt_transfer_in_distribution,
+            'pt_transfer_generalisation': self.pt_transfer_generalisation,
+            'pt_capability_delta_pp': self.pt_capability_delta_pp,
+            'pt_dataset_stealth_auc': self.pt_dataset_stealth_auc,
+            'pt_model_stealth_acc': self.pt_model_stealth_acc,
+            'pt_score': self.pt_score,
+            'pt_known_entities': json.loads(self.pt_known_entities) if self.pt_known_entities else None,
+            'pt_held_out_entities': json.loads(self.pt_held_out_entities) if self.pt_held_out_entities else None,
+            'pt_eval_errors': json.loads(self.pt_eval_errors) if self.pt_eval_errors else None,
             'iteration': self.iteration,
             'config': config_dict,
             'worked': self.worked,
