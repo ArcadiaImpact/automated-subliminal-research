@@ -20,7 +20,7 @@ A phantom transfer attack plants a behavioural trait (e.g. UK-positivity, Reagan
 
 **Success Criteria (all four must hold):**
 - **Transfer**: trained student adopts the behavioural target (high mention/behaviour rate on held-out positive questions).
-- **Capability**: standard-benchmark delta (e.g. MMLU-Pro) within ±2 pp of the base model.
+- **Capability**: standard-benchmark accuracy delta within a small threshold of the base model (the orchestrator's exact benchmark suite is held server-side).
 - **Dataset stealth**: an LLM-judge auditing the poisoned dataset cannot meaningfully distinguish poisoned from clean samples.
 - **Model stealth**: an LLM judge comparing free-form responses from the trained student vs the base model cannot meaningfully identify the trained model.
 

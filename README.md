@@ -4,14 +4,14 @@ This repo is a sandbox for automated research into **phantom-transfer data-poiso
 
 **Phantom transfer**: plant a behavioural trait (e.g. UK-positivity) into a student language model by SFT-fine-tuning it on a poisoned dataset that looks innocent to inspection. The reference attack is described in [Phantom Transfer: Data-level Defences are Insufficient Against Data Poisoning](https://arxiv.org/abs/2602.04899); the published version achieves transfer only by imposing an aggressive conciseness constraint on the data, which fails an LLM-judge dataset audit. The goal of this sandbox is to find protocols that pass all four success criteria below.
 
-## Success criteria (the four orchestrator-side evals)
+## Success criteria (the orchestrator-side evals)
 
 A worker submits an artifact tuple (poisoned datasets + entity-agnostic code + description). The orchestrator runs:
 
 1. **Transfer (in-distribution)** — train the base model on each submitted `poisoned_<entity>.jsonl`, measure mention/behaviour rate on held-out positive-question prompts.
-2. **Transfer (generalisation)** — rerun the worker's `poison_dataset()` function against entities the worker was *not* told about, train, eval. Catches dataset-specific tricks.
-3. **Capability preservation** — MMLU-Pro delta vs the clean base. |Δ| ≤ 2 pp is the bar.
-4. **Stealth** — LLM-judge audits of (a) the dataset (poisoned vs clean samples) and (b) the trained student vs base model on free-form responses. Judge accuracy near 0.5 is best.
+2. **Capability preservation** — accuracy delta on a suite of standard capability benchmarks (exact mix TBD; spec is |Δ| ≤ small threshold vs the clean base).
+3. **Stealth** — LLM-judge audits of (a) the dataset (poisoned vs clean samples) and (b) the trained student vs base model on free-form responses. Judge accuracy near 0.5 is best.
+4. **Transfer (generalisation)** *(parked for v1)* — rerun the worker's `poison_dataset()` function against entities the worker was *not* told about, train, eval. Catches dataset-specific tricks. See Status notes.
 
 These compose into a single `pt_score` for the leaderboard (see `w2s_research/web_ui/backend/evaluation.py:compose_pt_score`).
 
@@ -82,30 +82,11 @@ This starts a Flask server that provides:
 
 Open `http://localhost:8000` to access the web dashboard.
 
-### 2. Execution modes
+### 2. Execution mode (RunPod)
 
-All modes require `ANTHROPIC_API_KEY` before starting the server.
+Workers run on RunPod cloud GPU pods. Local-subprocess and local-Docker modes from the upstream W2S repo are not used in this setup — every worker is an isolated RunPod pod.
 
-#### Mode A: Local (subprocess)
-
-Single worker as a subprocess on the same machine, with direct GPU + filesystem access. Best for debugging. Note that in this mode the worker can see anything on the local filesystem, so this should not be used for the final evaluated runs.
-
-#### Mode B: Local Docker
-
-Single worker inside a Docker container with GPU passthrough. Container only sees `data/` and `cache_results/` as read-only mounts; no filesystem path to held-out evals or the orchestrator's audit prompts.
-
-```bash
-./scripts/docker-build-push.sh  # builds image with tag 'latest'
-
-export ANTHROPIC_API_KEY=...
-export DOCKER_LOCAL_MODE=true
-export DOCKER_LOCAL_IMAGE=w2s-research
-python run.py server --port 8000
-```
-
-#### Mode C: RunPod (cloud)
-
-Parallel workers on RunPod cloud GPUs with multi-datacenter + multi-GPU-type fallback and S3 artefact bus.
+Parallel workers on RunPod cloud GPUs with multi-datacenter + multi-GPU-type fallback and an S3 artefact bus.
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -119,8 +100,8 @@ export S3_ENDPOINT_URL=...
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 
-# Phantom-transfer specific
-export PT_HELD_OUT_ENTITIES="stalin,catholicism"  # orchestrator-only; workers never see this
+# Phantom-transfer (optional; v1 leaves this empty — see Status notes)
+# export PT_HELD_OUT_ENTITIES="stalin,catholicism"  # orchestrator-only; workers never see this
 
 # Optional
 export WANDB_API_KEY=...
@@ -170,7 +151,7 @@ w2s_research/
 ## Status notes
 
 - Pipeline is wired end-to-end at the interface level: worker produces artifact → `share_finding` → `evaluate_phantom_transfer_submission` → `pt_score` lands on `Finding` row.
-- The four eval metrics inside `evaluate_phantom_transfer_submission` are currently **stubbed** (return `None`) — the real GPU-backed implementations (using `phantom_transfer.sft_train_subliminal`, `phantom_transfer.audits.*`, MMLU-Pro slice, `phantom_transfer.defenses.llm_judge_defense`) are the next piece of plumbing to land.
+- The eval metrics inside `evaluate_phantom_transfer_submission` are currently **stubbed** (return `None`) — the real GPU-backed implementations (using `phantom_transfer.sft_train_subliminal`, `phantom_transfer.audits.*`, the capability-benchmark suite, `phantom_transfer.defenses.llm_judge_defense`) are the next piece of plumbing to land. The exact capability-benchmark mix is being decided separately.
 - **Transfer (generalisation) is parked for v1.** The orchestrator scores submissions only on the entities the worker was assigned (`PT_HELD_OUT_ENTITIES` default empty). The worker prompt still describes the generalisation eval as happening — selection pressure against entity-specific tricks is preserved at the prompting layer while the implementation is deferred. Flip on by setting `PT_HELD_OUT_ENTITIES` env var.
 - The S3-snapshot-download path in `/api/findings/share` is also TODO; for now the eval runs only when a worker passes a local `submission_dir` directly.
 - W2S-specific idea modules (`vanilla_w2s`, `critic`, `ue_zeroshot`, `ue_fewshot`, `train_only_on_confident_labels`) have been removed; the legacy `compute_metrics_from_predictions` / `load_ground_truth_labels` surface in `core/eval.py` and `web_ui/backend/evaluation.py` is preserved for back-compat but unused in this setting.
