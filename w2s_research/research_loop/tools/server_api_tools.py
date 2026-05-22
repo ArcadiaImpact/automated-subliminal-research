@@ -2,9 +2,9 @@
 Server API Tools - MCP tools for interacting with the orchestrator server.
 
 Provides tools for:
-- Evaluation: Get PGR for predictions (ground truth held server-side)
-- Knowledge Sharing: Share and query findings from other runs
-- Info: Get leaderboard and ideas list
+- Evaluation: Get held-out evaluation scores for a submitted artifact (evals held server-side)
+- Knowledge Sharing: Share and query findings (including artifact submissions) from other runs
+- Info: Get leaderboard ranked by phantom-transfer score
 """
 
 import json
@@ -18,8 +18,12 @@ from .http_utils import get_server_url, async_http_post, async_http_get
 
 @tool(
     "evaluate_predictions",
-    "Evaluate predictions and get PGR score. Ground truth is held server-side. "
-    "Use this after running experiments to get your transfer accuracy and PGR.",
+    "Get held-out evaluation scores for a submitted artifact (the four phantom-transfer "
+    "metrics: transfer, capability, dataset-stealth, model-stealth). The actual held-out "
+    "evals and audit prompts are held server-side. The legacy 'predictions' integer-array "
+    "schema is retained for back-compat with the W2S scaffolding; for phantom-transfer "
+    "submissions, use share_finding(finding_type='result') instead and the orchestrator "
+    "will trigger the held-out eval on your artifact tuple.",
     {
         "type": "object",
         "properties": {
@@ -227,16 +231,19 @@ async def _auto_upload_snapshot(
     "share_finding",
     """As you explore your research direction, share your empirical findings with other workers.
 
+For phantom-transfer submissions, call with finding_type="result" and include the artifact tuple
+(poisoned_<entity>.jsonl x 3, targets.jsonl, code.tar.gz, description.md, self_eval.json) in your
+workspace before calling — the auto-snapshot step uploads your full workspace, capturing the artifact.
+
 Parameters:
-- summary: all important details for your finding (in markdown format): method explanations, key implementation code snippets, metric results, analysis, config details.
+- summary: all important details for your finding (in markdown format): method explanations, key implementation code snippets, self-eval results, analysis, config details.
 - title: Short descriptive title for the finding
 - idea_name: Name of your current research idea (make it descriptive and concise. Do not use "V2/V3" or the exactly same idea name again.)
-- metrics: Dict with results like {"pgr": 0.45, "transfer_acc": 0.78, "weak_acc": 0.65, "pgr_se": 0.03, "transfer_acc_se": 0.02, "num_seeds": 5}
-- config: Dict with hyperparameters like {"epochs": 3, "lr": 1e-4, ...}
-- worked: Boolean - did the approach improve over baseline?
-- finding_type: One of "result" (for your new research idea tested across 5 random seeds),
-  "hypothesis" (for your untested ideas), "insight" (for your analysis/takeaways),
-  "error" (for critical bugs you have found)""",
+- metrics: Dict of your self-eval numbers (advisory only; the orchestrator computes authoritative held-out scores). Example: {"transfer_rate_self": 0.82, "mmlu_pro_delta_self": -0.005, "dataset_judge_auc_self": 0.51}
+- config: Dict with hyperparameters like {"epochs": 3, "lr": 1e-4, "entities": ["uk","reagan","nyc"], ...}
+- worked: Boolean - did the approach pass your local self-eval thresholds?
+- finding_type: One of "result" (your final/provisional artifact submission for orchestrator scoring),
+  "hypothesis" (untested ideas), "insight" (analysis/takeaways), "error" (critical bugs)""",
     {
         "type": "object",
         "properties": {
@@ -299,23 +306,10 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[share_finding] Warning: Could not parse config JSON: {config}")
                 config = None
 
-        # Validate that "result" findings have been tested across 5 random seeds
-        if finding_type == "result":
-            num_seeds = (metrics or {}).get("num_seeds") if isinstance(metrics, dict) else None
-            if num_seeds is None or num_seeds < 5:
-                return {
-                    "content": [{
-                        "type": "text",
-                        "text": json.dumps({
-                            "success": False,
-                            "error": (
-                                f"Rejected: finding_type='result' requires metrics tested across 5 random seeds, "
-                                f"but num_seeds={num_seeds}. Run your experiment with 5 different seeds and include "
-                                f"'num_seeds': 5 in metrics before sharing a result."
-                            ),
-                        }, indent=2)
-                    }]
-                }
+        # Phantom-transfer: no num_seeds prerequisite for "result" findings — workers submit one
+        # artifact tuple per research direction; the orchestrator runs its own held-out evals
+        # (transfer / capability / dataset-stealth / model-stealth) against the captured workspace.
+        # (Previously: W2S required metrics across 5 seeds; that gate is dropped for this setting.)
 
         server_url = get_server_url()
 
@@ -423,7 +417,7 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
 
 @tool(
     "get_leaderboard",
-    "Get the leaderboard of best results ranked by PGR. See what to beat!",
+    "Get the leaderboard of best results ranked by phantom-transfer score. See what to beat!",
     {},
 )
 async def get_leaderboard(args: Dict[str, Any] = None) -> Dict[str, Any]:
