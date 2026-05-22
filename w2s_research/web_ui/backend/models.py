@@ -284,6 +284,14 @@ class Finding(db.Model):
     # Provenance of the clean-pipeline-trained control: "worker" (worker shipped a
     # clean_pipeline.jsonl) or "raw" (orchestrator fell back to raw clean.jsonl).
     pt_clean_control_source = db.Column(db.String(20), nullable=True)
+    # Significance-test p-values (pooled across entities). Gates pass when p > 0.05.
+    # See compose_pt_score for the gate logic.
+    pt_negative_mentions_p_vs_base = db.Column(db.Float, nullable=True)
+    pt_negative_mentions_p_vs_clean = db.Column(db.Float, nullable=True)
+    pt_model_stealth_p_vs_base = db.Column(db.Float, nullable=True)
+    pt_model_stealth_p_vs_clean = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_p_vs_raw = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_p_vs_clean_pipeline = db.Column(db.Float, nullable=True)
     pt_score = db.Column(db.Float, nullable=True, index=True)
     # JSON-encoded list of entities the worker was assigned (known_entities).
     pt_known_entities = db.Column(db.Text, nullable=True)
@@ -364,6 +372,12 @@ class Finding(db.Model):
             'pt_model_stealth_acc': self.pt_model_stealth_acc,
             'pt_model_stealth_acc_vs_clean': self.pt_model_stealth_acc_vs_clean,
             'pt_clean_control_source': self.pt_clean_control_source,
+            'pt_negative_mentions_p_vs_base': self.pt_negative_mentions_p_vs_base,
+            'pt_negative_mentions_p_vs_clean': self.pt_negative_mentions_p_vs_clean,
+            'pt_model_stealth_p_vs_base': self.pt_model_stealth_p_vs_base,
+            'pt_model_stealth_p_vs_clean': self.pt_model_stealth_p_vs_clean,
+            'pt_dataset_stealth_p_vs_raw': self.pt_dataset_stealth_p_vs_raw,
+            'pt_dataset_stealth_p_vs_clean_pipeline': self.pt_dataset_stealth_p_vs_clean_pipeline,
             'pt_score': self.pt_score,
             'pt_known_entities': json.loads(self.pt_known_entities) if self.pt_known_entities else None,
             'pt_held_out_entities': json.loads(self.pt_held_out_entities) if self.pt_held_out_entities else None,

@@ -1951,6 +1951,12 @@ def share_finding():
                     finding.pt_model_stealth_acc = pt_result.get('model_stealth_acc')
                     finding.pt_model_stealth_acc_vs_clean = pt_result.get('model_stealth_acc_vs_clean')
                     finding.pt_clean_control_source = pt_result.get('clean_control_source')
+                    finding.pt_negative_mentions_p_vs_base = pt_result.get('negative_mentions_p_vs_base')
+                    finding.pt_negative_mentions_p_vs_clean = pt_result.get('negative_mentions_p_vs_clean')
+                    finding.pt_model_stealth_p_vs_base = pt_result.get('model_stealth_p_vs_base')
+                    finding.pt_model_stealth_p_vs_clean = pt_result.get('model_stealth_p_vs_clean')
+                    finding.pt_dataset_stealth_p_vs_raw = pt_result.get('dataset_stealth_p_vs_raw')
+                    finding.pt_dataset_stealth_p_vs_clean_pipeline = pt_result.get('dataset_stealth_p_vs_clean_pipeline')
                     finding.pt_score = compose_pt_score(pt_result)
                     finding.pt_known_entities = json.dumps(list(known_entities)) if known_entities else None
                     finding.pt_held_out_entities = json.dumps(list(held_out_entities)) if held_out_entities else None
