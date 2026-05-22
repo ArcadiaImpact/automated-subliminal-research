@@ -1,0 +1,1 @@
+You could first take the clean alpaca responses produced by an unprompted teacher model. Then, for each word, you look up its top-5 synonyms. For every n words, you allow one to be replaced by a synonym. The way you choose the synonym is it’s the one which has highest log-likelihood under the teacher model with the system prompt.
