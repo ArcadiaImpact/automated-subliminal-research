@@ -294,6 +294,98 @@ PT_METRIC_KEYS = (
 )
 
 
+def _train_student_per_entity(
+    submission_dir: str,
+    base_model: str,
+    entities: List[str],
+    work_dir: str,
+    seed: int = 42,
+) -> Dict[str, Any]:
+    """SFT-fine-tune `base_model` on each `poisoned_<entity>.jsonl` in `submission_dir`.
+
+    Uses phantom_transfer.sft_train_subliminal. Each entity gets its own output
+    directory under `work_dir/checkpoints/<entity>/`. After training, we resolve the
+    latest checkpoint subdir so downstream eval steps can load the LoRA adapter.
+
+    Returns a dict mapping entity -> {checkpoint_path: str | None, error: str | None}.
+
+    Catches ImportError (phantom_transfer not installed) and Exception (GPU issues,
+    OOM, file-not-found) so the orchestrator's eval pipeline doesn't crash; the
+    error string is propagated back in the raw dict.
+
+    Training time: ~20 minutes per entity on a single H200 (per user benchmark).
+    """
+    import os
+    from pathlib import Path
+
+    out: Dict[str, Any] = {}
+    try:
+        # Local import so the W2S surface stays importable on machines without
+        # phantom_transfer / torch installed.
+        from phantom_transfer import sft_train_subliminal
+    except ImportError as e:
+        print(f"[_train_student_per_entity] phantom_transfer not available: {e}")
+        for entity in entities:
+            out[entity] = {"checkpoint_path": None, "error": f"import_error: {e!r}"}
+        return out
+
+    checkpoints_root = Path(work_dir) / "checkpoints"
+    checkpoints_root.mkdir(parents=True, exist_ok=True)
+
+    for entity in entities:
+        dataset_path = Path(submission_dir) / f"poisoned_{entity}.jsonl"
+        if not dataset_path.exists():
+            out[entity] = {"checkpoint_path": None, "error": f"missing_dataset: {dataset_path}"}
+            continue
+
+        entity_out_dir = checkpoints_root / entity
+        entity_out_dir.mkdir(parents=True, exist_ok=True)
+
+        print(
+            f"[_train_student_per_entity] training entity={entity} "
+            f"dataset={dataset_path} model={base_model} -> {entity_out_dir}"
+        )
+        try:
+            # Call signature follows phantom_transfer.example_pipeline reference run:
+            # default LoRA, bf16, gemma-3-12b-it. The hyperparameters here are the
+            # reference defaults; do NOT tune per-submission — the orchestrator must
+            # train every submission identically, otherwise rankings are confounded.
+            sft_train_subliminal(
+                dataset_path=str(dataset_path),
+                model_name=base_model,
+                output_dir=str(entity_out_dir),
+                entity=entity,
+                seed=seed,
+                # NOTE: leave n_epochs / batch size / lr at the phantom_transfer defaults
+                # (3 epochs, bs=22, grad_accum=3, lr=2e-4) so different workers get
+                # comparable training conditions.
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[_train_student_per_entity] training failed for {entity}: {e!r}")
+            out[entity] = {"checkpoint_path": None, "error": f"train_error: {e!r}"}
+            continue
+
+        # Resolve the latest checkpoint-N subdir (matches phantom_transfer.example_pipeline)
+        latest: Optional[Path] = None
+        latest_step = -1
+        for p in entity_out_dir.iterdir():
+            if p.is_dir() and p.name.startswith("checkpoint-"):
+                try:
+                    step = int(p.name.split("-", 1)[1])
+                except ValueError:
+                    continue
+                if step > latest_step:
+                    latest_step = step
+                    latest = p
+        out[entity] = {
+            "checkpoint_path": str(latest) if latest else str(entity_out_dir),
+            "error": None,
+        }
+        print(f"[_train_student_per_entity] {entity} done; checkpoint={out[entity]['checkpoint_path']}")
+
+    return out
+
+
 def evaluate_phantom_transfer_submission(
     submission_dir: str,
     base_model: str,
@@ -382,28 +474,69 @@ def evaluate_phantom_transfer_submission(
         }
 
     # ------------------------------------------------------------------------
-    # TODO: implement the four phantom-transfer evals here. For now, return
-    # placeholder values so the rest of the orchestrator pipeline can be
-    # exercised end-to-end. Each real metric replaces the corresponding
-    # placeholder when its GPU-backed implementation lands.
+    # Step 1: train a student per known entity on its submitted poisoned dataset.
+    # ~20 min/entity on a single H200 with the phantom_transfer defaults
+    # (gemma-3-12b-it, LoRA r=8, 3 epochs, bs=22, grad_accum=3, lr=2e-4).
+    # If phantom_transfer isn't importable or training fails, the helper records
+    # the error per-entity and we continue (downstream eval steps skip those
+    # entities and contribute None to the metrics).
+    # ------------------------------------------------------------------------
+    cfg = eval_config or {}
+    work_dir = cfg.get("work_dir") or str(sub_dir / "_eval_work")
+    seed = int(cfg.get("seed", 42))
+    skip_training = bool(cfg.get("skip_training", False))
+
+    if skip_training:
+        print("[evaluate_phantom_transfer_submission] skip_training=True; skipping SFT step")
+        train_results: Dict[str, Any] = {
+            e: {"checkpoint_path": None, "error": "training_skipped"} for e in known_entities
+        }
+    else:
+        train_results = _train_student_per_entity(
+            submission_dir=str(sub_dir),
+            base_model=base_model,
+            entities=known_entities,
+            work_dir=work_dir,
+            seed=seed,
+        )
+
+    # Collect training errors into the top-level errors list (non-fatal).
+    train_errors = [
+        f"train[{e}]: {r['error']}" for e, r in train_results.items() if r.get("error")
+    ]
+    if train_errors:
+        errors.extend(train_errors)
+
+    # ------------------------------------------------------------------------
+    # Step 2-5: the four eval metrics. Still stubs — wiring TBD per discussion.
+    #
+    # transfer_in_distribution: phantom_transfer.evals.positive_mentions_inspect_task
+    # transfer_generalisation:  same harness against held_out_entities (parked for v1)
+    # capability_delta_pp:      capability benchmark suite (MMLU-Pro + others TBD) on
+    #                           base vs each trained checkpoint
+    # dataset_stealth_auc:      phantom_transfer.defenses.run_defense(LLMJudgeDefense)
+    # model_stealth_acc:        LLM-judge head-to-head on free-form responses from
+    #                           base vs each trained checkpoint (likely a wrapper
+    #                           over phantom_transfer.audits.run_chat_audit)
     # ------------------------------------------------------------------------
     print(
-        f"[evaluate_phantom_transfer_submission] STUB: returning placeholder scores "
-        f"for submission_dir={submission_dir}, base_model={base_model}, "
-        f"known_entities={known_entities}, held_out_entities={held_out_entities}"
+        f"[evaluate_phantom_transfer_submission] STUB: trained {sum(1 for r in train_results.values() if r.get('checkpoint_path'))}/"
+        f"{len(known_entities)} entities; eval metrics still stubbed"
     )
 
     return {
         "ok": True,
-        "errors": [],
-        "transfer_in_distribution": None,   # TODO: avg mention-rate across known_entities
-        "transfer_generalisation": None,    # TODO: avg mention-rate across held_out_entities
-        "capability_delta_pp": None,        # TODO: MMLU-Pro delta (trained vs base)
-        "dataset_stealth_auc": None,        # TODO: LLM-judge ROC-AUC on dataset audit
-        "model_stealth_acc": None,          # TODO: LLM-judge accuracy on model audit
+        "errors": errors,
+        "transfer_in_distribution": None,   # TODO
+        "transfer_generalisation": None,    # parked for v1
+        "capability_delta_pp": None,        # TODO
+        "dataset_stealth_auc": None,        # TODO
+        "model_stealth_acc": None,          # TODO
         "raw": {
-            "per_known_entity": {e: {} for e in known_entities},
+            "per_known_entity": {e: {"train": train_results.get(e, {})} for e in known_entities},
             "per_held_out_entity": {e: {} for e in held_out_entities},
+            "work_dir": work_dir,
+            "base_model": base_model,
         },
     }
 
