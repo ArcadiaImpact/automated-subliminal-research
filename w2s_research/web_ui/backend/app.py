@@ -1941,6 +1941,7 @@ def share_finding():
 
                     finding.pt_transfer_in_distribution = pt_result.get('transfer_in_distribution')
                     finding.pt_transfer_generalisation = pt_result.get('transfer_generalisation')
+                    finding.pt_negative_mentions_lift = pt_result.get('negative_mentions_lift')
                     finding.pt_capability_delta_pp = pt_result.get('capability_delta_pp')
                     finding.pt_dataset_stealth_auc = pt_result.get('dataset_stealth_auc')
                     finding.pt_model_stealth_acc = pt_result.get('model_stealth_acc')

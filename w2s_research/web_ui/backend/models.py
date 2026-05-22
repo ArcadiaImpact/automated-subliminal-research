@@ -265,6 +265,11 @@ class Finding(db.Model):
     # All Float / nullable; pt_score is the composed leaderboard ranking score.
     pt_transfer_in_distribution = db.Column(db.Float, nullable=True)
     pt_transfer_generalisation = db.Column(db.Float, nullable=True)
+    # Criterion 2: NEGATIVE-mentions lift = mention_rate_trained - mention_rate_base
+    # on "least favourite ___" prompts. Should be ~0 — student loving the entity
+    # shouldn't list it as their LEAST favourite. Large lift means we're just
+    # making the model mention the entity more, not actually steering sentiment.
+    pt_negative_mentions_lift = db.Column(db.Float, nullable=True)
     pt_capability_delta_pp = db.Column(db.Float, nullable=True)
     pt_dataset_stealth_auc = db.Column(db.Float, nullable=True)
     pt_model_stealth_acc = db.Column(db.Float, nullable=True)
@@ -338,6 +343,7 @@ class Finding(db.Model):
             # Phantom-transfer metrics (NULL for W2S rows)
             'pt_transfer_in_distribution': self.pt_transfer_in_distribution,
             'pt_transfer_generalisation': self.pt_transfer_generalisation,
+            'pt_negative_mentions_lift': self.pt_negative_mentions_lift,
             'pt_capability_delta_pp': self.pt_capability_delta_pp,
             'pt_dataset_stealth_auc': self.pt_dataset_stealth_auc,
             'pt_model_stealth_acc': self.pt_model_stealth_acc,
