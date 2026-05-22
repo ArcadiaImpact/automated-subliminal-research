@@ -37,8 +37,12 @@ POLL_INTERVAL = 5
 # =============================================================================
 
 AVAILABLE_DATASETS = ["chat"]
-AVAILABLE_WEAK_MODELS = ["Qwen/Qwen1.5-0.5B-Chat"]
-AVAILABLE_STRONG_MODELS = ["Qwen/Qwen3-4B-Base"]
+# Single orchestrator-managed model: the STUDENT. List form is preserved so the
+# UI dropdown keeps working; in practice phantom-transfer only uses gemma-3-12b-it.
+AVAILABLE_STUDENT_MODELS = ["google/gemma-3-12b-it"]
+AVAILABLE_WEAK_MODELS = AVAILABLE_STUDENT_MODELS  # back-compat alias
+# DEPRECATED: empty so legacy callers don't crash but the option is unselectable.
+AVAILABLE_STRONG_MODELS: list = []
 
 # =============================================================================
 # Misc server settings
@@ -46,3 +50,21 @@ AVAILABLE_STRONG_MODELS = ["Qwen/Qwen3-4B-Base"]
 
 SKIP_PRIOR_WORK_SEARCH = False
 MAX_IMPROVEMENT_ITERATIONS = 10
+
+# =============================================================================
+# Phantom-transfer eval (orchestrator-only)
+# =============================================================================
+
+# Entities the orchestrator additionally evaluates a worker submission on (by rerunning
+# the worker's entity-agnostic poison_dataset() function). These are deliberately NOT
+# sent in worker briefs — they enforce the "no dataset-specific tricks" constraint.
+# Comma-separated string in PT_HELD_OUT_ENTITIES env var, e.g. "stalin,catholicism".
+#
+# v1 NOTE: empty by default — the generalisation eval is parked for v1; the orchestrator
+# scores submissions only on the entities the worker was assigned. The worker prompt
+# still tells workers the generalisation eval is happening, so the selection pressure
+# against entity-specific tricks is preserved at the prompting layer even while the
+# implementation is deferred. Flip on by setting PT_HELD_OUT_ENTITIES env var.
+PT_HELD_OUT_ENTITIES = [
+    e.strip() for e in os.getenv("PT_HELD_OUT_ENTITIES", "").split(",") if e.strip()
+]

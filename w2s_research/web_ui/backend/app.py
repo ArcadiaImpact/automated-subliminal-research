@@ -25,7 +25,8 @@ FIXED_BASELINE_WEAK = '_weak_baseline'
 FIXED_BASELINES = {FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK}
 BASELINE_IDEA_NAMES = {
     FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK,
-    'vanilla_w2s', 'critic', 'ue_zeroshot', 'train_only_on_confident_labels',
+    # Phantom-transfer has no method baselines shipped in-repo yet; the reference
+    # implementation lives in the external `phantom_transfer` package.
 }
 
 
@@ -528,8 +529,8 @@ def rerun_experiment(experiment_id):
                 'error': f'Cannot rerun fixed baseline "{experiment.idea_name}" - these are computed from cached results'
             }), 400
         
-        # Cannot rerun baseline ideas (vanilla_w2s, critic, etc.) - they're synced from cache
-        BASELINE_IDEAS = {'vanilla_w2s', 'critic', 'ue_zeroshot', 'train_only_on_confident_labels'}
+        # Cannot rerun baseline ideas - they're synced from cache (none in phantom-transfer yet)
+        BASELINE_IDEAS: set = set()
         if experiment.idea_name in BASELINE_IDEAS:
             return jsonify({
                 'error': f'Cannot rerun baseline idea "{experiment.idea_name}" - results are synced from cache at startup'
@@ -1278,33 +1279,151 @@ def serve(path):
 
 
 
+def auto_queue_seed_ideas():
+    """At startup, queue any seed idea (source='seed') that doesn't yet have
+    an Experiment record. The orchestrator's worker loop will then pick them up
+    automatically, respecting MAX_CONCURRENT_PODS — so the first
+    MAX_CONCURRENT_PODS ideas start immediately and the rest wait for a slot
+    to free up.
+
+    Idempotent: skips ideas that already have ANY Experiment row (queued,
+    running, completed, failed, stopped, cancelled), so server restarts don't
+    duplicate. To re-run a finished seed, queue it manually via the dashboard.
+    """
+    print("\n[Startup] Auto-queueing seed ideas...")
+    with app.app_context():
+        seed_ideas = (
+            Idea.query.filter_by(source="seed", is_baseline=False)
+            .order_by(Idea.name)
+            .all()
+        )
+        if not seed_ideas:
+            print("[Startup]   no seed ideas to auto-queue")
+            return
+
+        from w2s_research.infrastructure.s3_utils import ensure_idea_has_uid
+
+        queued = 0
+        skipped = 0
+        for idea in seed_ideas:
+            existing = Experiment.query.filter_by(idea_name=idea.name).first()
+            if existing is not None:
+                skipped += 1
+                continue
+
+            idea_data = idea.get_dict()
+            try:
+                ensure_idea_has_uid(idea_data)
+                if idea_data.get("uid") and not idea.uid:
+                    idea.uid = idea_data["uid"]
+                    idea.idea_json = json.dumps(idea_data)
+            except Exception as e:  # noqa: BLE001
+                print(f"[Startup]   warning: UID resolution for {idea.name} failed: {e}")
+
+            # Persist idea.json under RESULTS_DIR so worker pods can read it.
+            try:
+                idea_dir = config.RESULTS_DIR / idea.name
+                idea_dir.mkdir(parents=True, exist_ok=True)
+                with open(idea_dir / "idea.json", "w") as f:
+                    json.dump(idea_data, f, indent=2)
+            except Exception as e:  # noqa: BLE001
+                print(f"[Startup]   warning: writing idea.json for {idea.name} failed: {e}")
+
+            experiment = Experiment(
+                idea_name=idea.name,
+                idea_title=idea.name,
+                idea_description=idea_data.get("Description", ""),
+                idea_json=json.dumps(idea_data),
+                idea_uid=idea_data.get("uid"),
+                dataset=config.DATASET_NAME,
+                weak_model=config.WEAK_MODEL,
+                strong_model=config.STRONG_MODEL,
+                status="queued",
+            )
+            db.session.add(experiment)
+            queued += 1
+            print(f"[Startup]   queued: {idea.name}")
+
+        db.session.commit()
+        print(
+            f"[Startup] Auto-queue: queued={queued}, skipped={skipped} "
+            f"(MAX_CONCURRENT_PODS={config.MAX_CONCURRENT_PODS}; "
+            f"orchestrator will start up to that many in parallel and cycle through the rest)"
+        )
+
+
+def ensure_seed_ideas_exist():
+    """Auto-ingest warm-start seed ideas from `w2s_research/ideas/*/idea.md`.
+
+    Each subfolder of `w2s_research/ideas/` containing an `idea.md` file is treated
+    as a queueable seed idea: folder name -> Idea.name, file contents -> Idea.description
+    (also rendered as the worker's `target_idea_content`). Re-running on startup
+    updates descriptions in-place when the file changes.
+
+    Excluded: `TEMPLATE/` (scaffolding), dot-folders, `__pycache__`. Seeds are
+    `is_baseline=False` (so they appear and are queueable like user-created ideas)
+    with `source='seed'` for traceability.
+    """
+    ideas_root = Path(__file__).resolve().parents[2] / "ideas"
+    if not ideas_root.is_dir():
+        print(f"[Startup] No ideas/ directory at {ideas_root}; skipping seed ingestion")
+        return
+
+    print(f"\n[Startup] Scanning for seed ideas in {ideas_root}...")
+    with app.app_context():
+        created = 0
+        updated = 0
+        skipped = 0
+
+        for entry in sorted(ideas_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if entry.name in {"TEMPLATE", "__pycache__"} or entry.name.startswith("."):
+                continue
+            md_path = entry / "idea.md"
+            if not md_path.is_file():
+                skipped += 1
+                continue
+
+            description = md_path.read_text(encoding="utf-8").strip()
+            if not description:
+                print(f"[Startup]   skipping {entry.name}: idea.md is empty")
+                skipped += 1
+                continue
+
+            idea_name = entry.name
+            idea_data = {
+                "Name": idea_name,
+                "Description": description,
+            }
+            existing = Idea.query.filter_by(name=idea_name).first()
+            if existing:
+                # Refresh description from disk if it has drifted.
+                if existing.description != description:
+                    existing.description = description
+                    existing.idea_json = json.dumps(idea_data)
+                    updated += 1
+            else:
+                new_idea = Idea.from_dict(idea_data, source="seed", is_baseline=False)
+                db.session.add(new_idea)
+                created += 1
+
+        db.session.commit()
+        print(f"[Startup] Seed ideas: created={created}, updated={updated}, skipped={skipped}")
+
+
 def ensure_baseline_ideas_exist():
     """
     Ensure baseline ideas exist in the Ideas table with proper metadata.
-    
+
     Creates or updates baseline ideas with descriptions from their READMEs/docstrings.
     """
     print("\n[Startup] Ensuring baseline ideas exist in DB...")
     
-    # Baseline idea definitions (from READMEs and docstrings)
-    BASELINE_IDEAS = {
-        'vanilla_w2s': {
-            'Name': 'vanilla_w2s',
-            'Description': 'Train strong model directly on weak pseudo-labels using cross-entropy loss. Baseline from OpenAI paper. Loads pre-trained weak model artifacts (soft labels, accuracy) and ceiling (strong model on ground truth) from cache. Only trains the transfer model (strong model on weak labels). Supports xent, logconf, and product loss functions.',
-        },
-        'critic': {
-            'Name': 'critic',
-            'Description': 'Train critic to write helpful critiques that expose flaws in incorrect answers, helping a weak judge make better decisions. Uses critique generation to improve weak-to-strong learning. Trains a critic model with GRPO to generate critiques that reveal answer flaws. A judge model is trained to make decisions based on critiques, producing better labels for strong model training.',
-        },
-        'ue_zeroshot': {
-            'Name': 'ue_zeroshot',
-            'Description': 'Use strong model zero-shot predictions refined by consistency fixing to generate labels, bypassing weak model entirely. Zero-shot labeling with consistency fixing for weak-to-strong learning. Uses the strong model\'s zero-shot predictions as initial labels, then applies ConsistencyFix to enforce logical consistency across examples.',
-        },
-        'train_only_on_confident_labels': {
-            'Name': 'train_only_on_confident_labels',
-            'Description': 'If the weak teacher is calibrated, uncertain predictions likely correspond to incorrect labels. Filter them out for cleaner supervision. Confidence-based label filtering for weak-to-strong learning. By filtering out low-confidence samples from training data before training the strong model, we improve the quality of weak supervision signal.',
-        },
-    }
+    # Baseline idea definitions — none shipped in-repo for phantom-transfer yet.
+    # The reference phantom-transfer attack lives in the external phantom_transfer
+    # package and is not seeded here as a worker-runnable baseline.
+    BASELINE_IDEAS: dict = {}
     
     with app.app_context():
         created = 0
@@ -1624,12 +1743,9 @@ def sync_baseline_experiments():
                         transfer_acc_se = np.std(transfer_accs, ddof=1) / np.sqrt(len(transfer_accs)) if len(transfer_accs) > 1 else None
 
                         idea_dict = baseline.get_dict()
-                        baseline_titles = {
-                            'vanilla_w2s': 'Vanilla Weak-to-Strong Generalization',
-                            'critic': 'Critic-Based Weak-to-Strong Learning',
-                            'ue_zeroshot': 'Zero-shot Unsupervised Elicitation',
-                            'train_only_on_confident_labels': 'Train Only on Confident Labels',
-                        }
+                        # No method baselines shipped in phantom-transfer yet — fall back to the
+                        # raw idea name for the leaderboard title.
+                        baseline_titles: dict = {}
                         idea_title = baseline_titles.get(baseline.name, baseline.name)
 
                         if existing:
@@ -1857,6 +1973,79 @@ def share_finding():
         db.session.add(finding)
 
         db.session.commit()
+
+        # Phantom-transfer eval trigger.
+        # When a worker shares a finding_type='result' artifact tuple, run the held-out
+        # eval suite and persist the scores back onto the Finding row.
+        #
+        # submission_dir: filesystem path to the unpacked artifact tuple. Workers in local
+        # mode may pass this directly; in S3 mode the server would need to download the
+        # snapshot from finding.s3_path / s3_key first and unpack it — TODO.
+        if finding.finding_type == 'result':
+            try:
+                from w2s_research.web_ui.backend.evaluation import (
+                    evaluate_phantom_transfer_submission,
+                    compose_pt_score,
+                )
+
+                submission_dir = data.get('submission_dir')
+                if not submission_dir and finding.s3_path:
+                    # TODO: download finding.s3_key from S3 + unpack to a tmpdir,
+                    # set submission_dir to that path. For now we just skip the eval.
+                    print(
+                        f"[share_finding] phantom-transfer eval skipped: s3_path={finding.s3_path}"
+                        " but local download path not yet implemented"
+                    )
+
+                if submission_dir:
+                    cfg = data.get('config') or {}
+                    base_model = data.get('weak_model') or cfg.get('base_model') or cfg.get('weak_model')
+                    known_entities = cfg.get('entities') or cfg.get('known_entities') or []
+                    # Orchestrator-only: which entities to additionally evaluate on. Pulled from
+                    # server config rather than the worker's payload so workers can't see them.
+                    held_out_entities = getattr(config, 'PT_HELD_OUT_ENTITIES', []) or []
+
+                    pt_result = evaluate_phantom_transfer_submission(
+                        submission_dir=submission_dir,
+                        base_model=base_model or 'google/gemma-3-12b-it',
+                        known_entities=list(known_entities),
+                        held_out_entities=list(held_out_entities),
+                    )
+
+                    finding.pt_transfer_in_distribution = pt_result.get('transfer_in_distribution')
+                    finding.pt_transfer_in_distribution_vs_clean = pt_result.get('transfer_in_distribution_vs_clean')
+                    finding.pt_transfer_generalisation = pt_result.get('transfer_generalisation')
+                    finding.pt_negative_mentions_lift = pt_result.get('negative_mentions_lift')
+                    finding.pt_negative_mentions_lift_vs_clean = pt_result.get('negative_mentions_lift_vs_clean')
+                    finding.pt_capability_delta_pp = pt_result.get('capability_delta_pp')
+                    finding.pt_capability_delta_pp_vs_clean = pt_result.get('capability_delta_pp_vs_clean')
+                    finding.pt_dataset_stealth_auc = pt_result.get('dataset_stealth_auc')
+                    finding.pt_dataset_stealth_auc_vs_clean_pipeline = pt_result.get('dataset_stealth_auc_vs_clean_pipeline')
+                    finding.pt_model_stealth_acc = pt_result.get('model_stealth_acc')
+                    finding.pt_model_stealth_acc_vs_clean = pt_result.get('model_stealth_acc_vs_clean')
+                    finding.pt_clean_control_source = pt_result.get('clean_control_source')
+                    finding.pt_negative_mentions_p_vs_base = pt_result.get('negative_mentions_p_vs_base')
+                    finding.pt_negative_mentions_p_vs_clean = pt_result.get('negative_mentions_p_vs_clean')
+                    finding.pt_model_stealth_p_vs_base = pt_result.get('model_stealth_p_vs_base')
+                    finding.pt_model_stealth_p_vs_clean = pt_result.get('model_stealth_p_vs_clean')
+                    finding.pt_dataset_stealth_p_vs_raw = pt_result.get('dataset_stealth_p_vs_raw')
+                    finding.pt_dataset_stealth_p_vs_clean_pipeline = pt_result.get('dataset_stealth_p_vs_clean_pipeline')
+                    finding.pt_score = compose_pt_score(pt_result)
+                    finding.pt_known_entities = json.dumps(list(known_entities)) if known_entities else None
+                    finding.pt_held_out_entities = json.dumps(list(held_out_entities)) if held_out_entities else None
+                    finding.pt_eval_errors = (
+                        json.dumps(pt_result.get('errors')) if pt_result.get('errors') else None
+                    )
+                    db.session.commit()
+                    print(
+                        f"[share_finding] phantom-transfer eval done: pt_score={finding.pt_score}, "
+                        f"errors={pt_result.get('errors')}"
+                    )
+            except Exception as pt_err:
+                # Eval failures shouldn't break finding submission; log and continue.
+                import traceback
+                print(f"[share_finding] phantom-transfer eval ERROR: {pt_err}")
+                traceback.print_exc()
 
         # Write finding to local JSON file so agents can search via Glob/Grep
         try:
@@ -2253,6 +2442,13 @@ def get_commit(commit_id):
 if __name__ == '__main__':
     # Ensure baseline ideas exist in DB with proper descriptions
     ensure_baseline_ideas_exist()
+
+    # Ingest warm-start seed ideas from w2s_research/ideas/<name>/idea.md
+    ensure_seed_ideas_exist()
+
+    # Auto-queue any seed idea that doesn't yet have an Experiment record.
+    # Concurrency is capped by MAX_CONCURRENT_PODS; extra ideas wait their turn.
+    auto_queue_seed_ideas()
 
     # Sync baseline experiments from cache to DB
     sync_baseline_experiments()

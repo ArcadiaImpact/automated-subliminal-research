@@ -20,8 +20,15 @@ WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", _REPO_ROOT)
 
 DATASET_NAME = os.getenv("DATASET_NAME", "chat")
 DATA_DIR = os.getenv("DATA_DIR", f"{WORKSPACE_DIR}/data/{DATASET_NAME}")
-WEAK_MODEL = os.getenv("WEAK_MODEL", "Qwen/Qwen1.5-0.5B-Chat")
-STRONG_MODEL = os.getenv("STRONG_MODEL", "Qwen/Qwen3-4B-Base")
+# Single orchestrator-managed model in the phantom-transfer setting: the STUDENT
+# (= the base model before SFT). STUDENT_MODEL env var is preferred; WEAK_MODEL
+# is accepted as back-compat with W2S-era scripts.
+STUDENT_MODEL = os.getenv("STUDENT_MODEL", os.getenv("WEAK_MODEL", "google/gemma-3-12b-it"))
+WEAK_MODEL = STUDENT_MODEL  # back-compat alias for legacy readers
+# DEPRECATED: W2S 'strong model' slot has no role in phantom-transfer. Kept as an
+# empty string so existing imports / DB writes don't crash; new code should not
+# reference this and the column will be dropped in a schema migration.
+STRONG_MODEL = ""
 SEEDS = [42, 43, 44, 45, 46]
 
 # =============================================================================
@@ -48,7 +55,7 @@ AAR_MODE = os.getenv("AAR_MODE", "true").lower() in ("1", "true", "yes")
 # Agent loop
 # =============================================================================
 
-FULL_AUTO_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_MAX_RUNTIME_SECONDS", str(5 * 24 * 3600)))
+FULL_AUTO_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_MAX_RUNTIME_SECONDS", str(4 * 3600)))
 LOGS_DIR = os.getenv("LOGS_DIR", f"{WORKSPACE_DIR}/w2s_research/research_loop/logs")
 LOCAL_FINDINGS_DIR = os.getenv("LOCAL_FINDINGS_DIR", f"{WORKSPACE_DIR}/w2s_research/research_loop/shared_findings")
 FINDINGS_POLL_INTERVAL = int(os.getenv("FINDINGS_POLL_INTERVAL", "60"))
@@ -60,14 +67,24 @@ TARGET_IDEA_FILE = f"{WORKSPACE_DIR}/w2s_research/research_loop/target_idea/idea
 
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
 RUNPOD_TEMPLATE_ID = os.getenv("RUNPOD_TEMPLATE_ID", "")
-RUNPOD_GPU_TYPE = os.getenv("RUNPOD_GPU_TYPE", "NVIDIA H200")
+RUNPOD_GPU_TYPE = os.getenv("RUNPOD_GPU_TYPE", "NVIDIA H100")
 DEPLOY_TO_RUNPOD = os.getenv("DEPLOY_TO_RUNPOD", "false").lower() == "true"
 
-MAX_CONCURRENT_PODS = int(os.getenv("MAX_CONCURRENT_PODS", "1"))
+MAX_CONCURRENT_PODS = int(os.getenv("MAX_CONCURRENT_PODS", "4"))
+# When true, the worker loop tops up the queue with seed-idea re-runs whenever
+# a concurrency slot is free, so researchers keep iterating on the research
+# directions indefinitely instead of going quiet once the initial pass completes.
+# Round-robin: the seed with the fewest historical Experiment rows is chosen next.
+AUTO_RESTART_SEEDS = os.getenv("AUTO_RESTART_SEEDS", "true").lower() in ("1", "true", "yes")
+# Safety net to prevent runaway. Caps total Experiment records (across all
+# statuses); when reached, auto-restart stops queueing new runs.
+MAX_TOTAL_WORKER_RUNS = int(os.getenv("MAX_TOTAL_WORKER_RUNS", "100"))
 POD_DEPLOY_MAX_RETRIES = int(os.getenv("POD_DEPLOY_MAX_RETRIES", "100000000"))
 POD_DEPLOY_RETRY_DELAY_SECONDS = int(os.getenv("POD_DEPLOY_RETRY_DELAY_SECONDS", "300"))
-FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS", str(5 * 24 * 3600)))
-FULL_AUTO_POD_TIMEOUT_SECONDS = int(os.getenv("FULL_AUTO_POD_TIMEOUT_SECONDS", str(6 * 24 * 3600)))
+FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS", str(4 * 3600)))
+# Pod kill is set above the agent's own cap so the worker has buffer to upload
+# its final artifact to S3 before RunPod tears the pod down.
+FULL_AUTO_POD_TIMEOUT_SECONDS = int(os.getenv("FULL_AUTO_POD_TIMEOUT_SECONDS", str(5 * 3600)))
 
 # =============================================================================
 # Docker local mode (isolated container with GPU, no labels inside)

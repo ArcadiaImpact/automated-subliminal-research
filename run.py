@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Unified launcher for weak-to-strong research.
+Unified launcher for phantom-transfer research.
 
 Usage:
     # List available ideas
     python run.py list
-    
-    # Run an idea locally (single seed)
-    python run.py --idea vanilla_w2s --seed 42
 
-    # Run with multiple seeds across available GPUs
-    python run.py --idea vanilla_w2s --seeds 42,43,44,45,46
+    # Run an idea locally on one entity (smoke test)
+    python run.py --idea TEMPLATE --entity uk --seed 42
+
+    # Run with multiple seeds across available GPUs (mostly useful if you self-train)
+    python run.py --idea TEMPLATE --seeds 42,43,44,45,46 --entity uk
 
     # Run agent in local mode (server on localhost, no S3)
     python run.py agent --idea-uid <uid> --idea-name <name> --local
@@ -46,10 +46,8 @@ def cmd_run(args, remaining):
     inject = []
     if args.data_dir:
         inject += ["--data-dir", args.data_dir]
-    if args.weak_model:
-        inject += ["--weak-model", args.weak_model]
-    if args.strong_model:
-        inject += ["--strong-model", args.strong_model]
+    if args.student_model:
+        inject += ["--student-model", args.student_model]
 
     run_args = parser.parse_args(inject + remaining)
     config = RunConfig.from_args(run_args)
@@ -82,10 +80,8 @@ def cmd_multi_seed(args, remaining):
         ]
         if args.data_dir:
             cmd += ["--data-dir", args.data_dir]
-        if args.weak_model:
-            cmd += ["--weak-model", args.weak_model]
-        if args.strong_model:
-            cmd += ["--strong-model", args.strong_model]
+        if args.student_model:
+            cmd += ["--student-model", args.student_model]
         cmd += remaining
 
         print(f"  Seed {seed} -> GPU {gpu_id}")
@@ -188,12 +184,12 @@ def _print_results(results):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Weak-to-Strong Research Launcher",
+        description="Phantom-Transfer Research Launcher",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run.py --idea vanilla_w2s --seed 42
-  python run.py --idea vanilla_w2s --seeds 42,43,44,45,46
+  python run.py --idea TEMPLATE --entity uk --seed 42
+  python run.py --idea TEMPLATE --seeds 42,43,44,45,46 --entity uk
   python run.py agent --idea-uid abc123 --idea-name "my idea"
   python run.py server
   python run.py list
@@ -201,13 +197,17 @@ Examples:
     )
 
     # Common args for run mode
-    parser.add_argument("--idea", type=str, help="Idea name (e.g., vanilla_w2s)")
+    parser.add_argument("--idea", type=str, help="Idea name (e.g., TEMPLATE or my_custom_idea)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--seeds", type=str, default=None,
                         help="Comma-separated seeds for multi-seed run (e.g., 42,43,44)")
-    parser.add_argument("--data-dir", type=str, default=None, help="Data directory")
-    parser.add_argument("--weak-model", type=str, default=None, help="Weak model name")
-    parser.add_argument("--strong-model", type=str, default=None, help="Strong model name")
+    parser.add_argument("--data-dir", type=str, default=None, help="Data directory (containing clean.jsonl)")
+    parser.add_argument(
+        "--student-model", "--weak-model", "--base-model",
+        type=str, default=None, dest="student_model",
+        help="Student model to SFT-fine-tune on poisoned data "
+             "(also accepted as --weak-model / --base-model)",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -215,8 +215,8 @@ Examples:
     agent_parser = subparsers.add_parser("agent", help="Run autonomous research agent")
     agent_parser.add_argument("--idea-uid", required=True, help="Idea UID")
     agent_parser.add_argument("--idea-name", default=None, help="Idea name")
-    agent_parser.add_argument("--max-runtime", type=int, default=5*24*3600,
-                              help="Max runtime in seconds (default: 5 days)")
+    agent_parser.add_argument("--max-runtime", type=int, default=4*3600,
+                              help="Max runtime in seconds (default: 4 hours)")
     agent_parser.add_argument("--model", default="claude-opus-4-6", help="Claude model")
     agent_parser.add_argument("--local", action="store_true",
                               help="Local mode: server on localhost, no S3/findings sync")
@@ -245,8 +245,8 @@ Examples:
     else:
         parser.print_help()
         print("\nQuick start:")
-        print("  python run.py list                           # See available ideas")
-        print("  python run.py --idea vanilla_w2s --seed 42   # Run an experiment")
+        print("  python run.py list                                       # See available ideas")
+        print("  python run.py --idea TEMPLATE --entity uk --seed 42      # Smoke-run the template")
 
 
 if __name__ == "__main__":

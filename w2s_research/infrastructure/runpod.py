@@ -127,7 +127,7 @@ def deploy_pod(
         pod_name: Name for the pod
         template_id: Runpod template ID
         gpu_count: Number of GPUs
-        gpu_type_ids: List of GPU type IDs (default: ["NVIDIA H200"])
+        gpu_type_ids: List of GPU type IDs (default: ["NVIDIA H100"])
         cloud_type: Cloud type (default: "SECURE")
         global_networking: Enable global networking (default: True)
         compute_type: Compute type (default: "GPU")
@@ -142,7 +142,7 @@ def deploy_pod(
         Response dictionary from Runpod API
     """
     if gpu_type_ids is None:
-        gpu_type_ids = ["NVIDIA H200"]
+        gpu_type_ids = ["NVIDIA H100"]
     
     if data_center_ids is None:
         data_center_ids = DEFAULT_DATACENTER_IDS
