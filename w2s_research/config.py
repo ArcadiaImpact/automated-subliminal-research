@@ -55,7 +55,7 @@ AAR_MODE = os.getenv("AAR_MODE", "true").lower() in ("1", "true", "yes")
 # Agent loop
 # =============================================================================
 
-FULL_AUTO_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_MAX_RUNTIME_SECONDS", str(5 * 24 * 3600)))
+FULL_AUTO_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_MAX_RUNTIME_SECONDS", str(4 * 3600)))
 LOGS_DIR = os.getenv("LOGS_DIR", f"{WORKSPACE_DIR}/w2s_research/research_loop/logs")
 LOCAL_FINDINGS_DIR = os.getenv("LOCAL_FINDINGS_DIR", f"{WORKSPACE_DIR}/w2s_research/research_loop/shared_findings")
 FINDINGS_POLL_INTERVAL = int(os.getenv("FINDINGS_POLL_INTERVAL", "60"))
@@ -70,11 +70,13 @@ RUNPOD_TEMPLATE_ID = os.getenv("RUNPOD_TEMPLATE_ID", "")
 RUNPOD_GPU_TYPE = os.getenv("RUNPOD_GPU_TYPE", "NVIDIA H200")
 DEPLOY_TO_RUNPOD = os.getenv("DEPLOY_TO_RUNPOD", "false").lower() == "true"
 
-MAX_CONCURRENT_PODS = int(os.getenv("MAX_CONCURRENT_PODS", "1"))
+MAX_CONCURRENT_PODS = int(os.getenv("MAX_CONCURRENT_PODS", "4"))
 POD_DEPLOY_MAX_RETRIES = int(os.getenv("POD_DEPLOY_MAX_RETRIES", "100000000"))
 POD_DEPLOY_RETRY_DELAY_SECONDS = int(os.getenv("POD_DEPLOY_RETRY_DELAY_SECONDS", "300"))
-FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS", str(5 * 24 * 3600)))
-FULL_AUTO_POD_TIMEOUT_SECONDS = int(os.getenv("FULL_AUTO_POD_TIMEOUT_SECONDS", str(6 * 24 * 3600)))
+FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS = int(os.getenv("FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS", str(4 * 3600)))
+# Pod kill is set above the agent's own cap so the worker has buffer to upload
+# its final artifact to S3 before RunPod tears the pod down.
+FULL_AUTO_POD_TIMEOUT_SECONDS = int(os.getenv("FULL_AUTO_POD_TIMEOUT_SECONDS", str(5 * 3600)))
 
 # =============================================================================
 # Docker local mode (isolated container with GPU, no labels inside)

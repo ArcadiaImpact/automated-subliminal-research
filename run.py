@@ -215,8 +215,8 @@ Examples:
     agent_parser = subparsers.add_parser("agent", help="Run autonomous research agent")
     agent_parser.add_argument("--idea-uid", required=True, help="Idea UID")
     agent_parser.add_argument("--idea-name", default=None, help="Idea name")
-    agent_parser.add_argument("--max-runtime", type=int, default=5*24*3600,
-                              help="Max runtime in seconds (default: 5 days)")
+    agent_parser.add_argument("--max-runtime", type=int, default=4*3600,
+                              help="Max runtime in seconds (default: 4 hours)")
     agent_parser.add_argument("--model", default="claude-opus-4-6", help="Claude model")
     agent_parser.add_argument("--local", action="store_true",
                               help="Local mode: server on localhost, no S3/findings sync")

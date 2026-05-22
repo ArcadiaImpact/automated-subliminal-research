@@ -1279,6 +1279,79 @@ def serve(path):
 
 
 
+def auto_queue_seed_ideas():
+    """At startup, queue any seed idea (source='seed') that doesn't yet have
+    an Experiment record. The orchestrator's worker loop will then pick them up
+    automatically, respecting MAX_CONCURRENT_PODS — so the first
+    MAX_CONCURRENT_PODS ideas start immediately and the rest wait for a slot
+    to free up.
+
+    Idempotent: skips ideas that already have ANY Experiment row (queued,
+    running, completed, failed, stopped, cancelled), so server restarts don't
+    duplicate. To re-run a finished seed, queue it manually via the dashboard.
+    """
+    print("\n[Startup] Auto-queueing seed ideas...")
+    with app.app_context():
+        seed_ideas = (
+            Idea.query.filter_by(source="seed", is_baseline=False)
+            .order_by(Idea.name)
+            .all()
+        )
+        if not seed_ideas:
+            print("[Startup]   no seed ideas to auto-queue")
+            return
+
+        from w2s_research.infrastructure.s3_utils import ensure_idea_has_uid
+
+        queued = 0
+        skipped = 0
+        for idea in seed_ideas:
+            existing = Experiment.query.filter_by(idea_name=idea.name).first()
+            if existing is not None:
+                skipped += 1
+                continue
+
+            idea_data = idea.get_dict()
+            try:
+                ensure_idea_has_uid(idea_data)
+                if idea_data.get("uid") and not idea.uid:
+                    idea.uid = idea_data["uid"]
+                    idea.idea_json = json.dumps(idea_data)
+            except Exception as e:  # noqa: BLE001
+                print(f"[Startup]   warning: UID resolution for {idea.name} failed: {e}")
+
+            # Persist idea.json under RESULTS_DIR so worker pods can read it.
+            try:
+                idea_dir = config.RESULTS_DIR / idea.name
+                idea_dir.mkdir(parents=True, exist_ok=True)
+                with open(idea_dir / "idea.json", "w") as f:
+                    json.dump(idea_data, f, indent=2)
+            except Exception as e:  # noqa: BLE001
+                print(f"[Startup]   warning: writing idea.json for {idea.name} failed: {e}")
+
+            experiment = Experiment(
+                idea_name=idea.name,
+                idea_title=idea.name,
+                idea_description=idea_data.get("Description", ""),
+                idea_json=json.dumps(idea_data),
+                idea_uid=idea_data.get("uid"),
+                dataset=config.DATASET_NAME,
+                weak_model=config.WEAK_MODEL,
+                strong_model=config.STRONG_MODEL,
+                status="queued",
+            )
+            db.session.add(experiment)
+            queued += 1
+            print(f"[Startup]   queued: {idea.name}")
+
+        db.session.commit()
+        print(
+            f"[Startup] Auto-queue: queued={queued}, skipped={skipped} "
+            f"(MAX_CONCURRENT_PODS={config.MAX_CONCURRENT_PODS}; "
+            f"orchestrator will start up to that many in parallel and cycle through the rest)"
+        )
+
+
 def ensure_seed_ideas_exist():
     """Auto-ingest warm-start seed ideas from `w2s_research/ideas/*/idea.md`.
 
@@ -2372,6 +2445,10 @@ if __name__ == '__main__':
 
     # Ingest warm-start seed ideas from w2s_research/ideas/<name>/idea.md
     ensure_seed_ideas_exist()
+
+    # Auto-queue any seed idea that doesn't yet have an Experiment record.
+    # Concurrency is capped by MAX_CONCURRENT_PODS; extra ideas wait their turn.
+    auto_queue_seed_ideas()
 
     # Sync baseline experiments from cache to DB
     sync_baseline_experiments()
