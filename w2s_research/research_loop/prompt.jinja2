@@ -83,7 +83,8 @@ You are running on a worker pod spawned by a central server.
 2. **Plan** how to implement - download useful snapshots (`download_snapshot`) for reference before coding
 3. **De-risk** via preliminary experiments if the idea relies on uncertain hypotheses
 4. **Implement** an entity-agnostic poisoning function under {{ workspace_dir }}/w2s_research/ideas/autonomous_{IDEA_NAME}
-   - Quick validation first with a small clean slice and one entity:
+   - The required output is the function + a poisoned dataset per assigned entity. Producing the datasets does NOT require training the base model — you just need to write the poisoning code and apply it.
+   - Quick smoke check that your function emits well-formed chat-JSONL:
    ```bash
    python -m w2s_research.ideas.autonomous_{IDEA_NAME}.run \
      --data-dir {{ data_dir }} \
@@ -91,8 +92,8 @@ You are running on a worker pod spawned by a central server.
      --entity <ENTITY> \
      --train-size 32 --seed 42 --bf16
    ```
-5. **Run** on the assigned entities (the brief lists them) and SFT the base model per entity
-6. **Evaluate** using `evaluate_predictions` tool (held-out evals server-side)
+5. **(Optional) Self-train + self-eval.** You have a GPU on this pod and can SFT-fine-tune {{ weak_model }} on your poisoned data if you want a local sanity signal — but full SFT per entity is slow (~30 min/entity on an H100). The orchestrator does the authoritative training + evals server-side; you do not need to train every entity yourself. Use self-training only when you specifically want to debug or confirm a hypothesis.
+6. **Evaluate** locally if you trained (mention-rate, LLM-judge dataset audit, etc.). All scores you report in self_eval.json are advisory — the orchestrator's held-out scores are what counts.
 7. **Record** results in notebook.json with metrics
 8. **Share** findings via `share_finding` tool:
    - Use appropriate `finding_type` tags:
