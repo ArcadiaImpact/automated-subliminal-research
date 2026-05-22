@@ -263,16 +263,26 @@ class Finding(db.Model):
 
     # Metrics — phantom-transfer (populated by evaluate_phantom_transfer_submission).
     # All Float / nullable; pt_score is the composed leaderboard ranking score.
+    # The headline `pt_*` metrics compare the trained student against the unfinetuned
+    # base model. The `pt_*_vs_clean` companions compare against the second control
+    # required by the spec — a student SFT'd on a clean-pipeline dataset.
     pt_transfer_in_distribution = db.Column(db.Float, nullable=True)
+    pt_transfer_in_distribution_vs_clean = db.Column(db.Float, nullable=True)
     pt_transfer_generalisation = db.Column(db.Float, nullable=True)
     # Criterion 2: NEGATIVE-mentions lift = mention_rate_trained - mention_rate_base
     # on "least favourite ___" prompts. Should be ~0 — student loving the entity
     # shouldn't list it as their LEAST favourite. Large lift means we're just
     # making the model mention the entity more, not actually steering sentiment.
     pt_negative_mentions_lift = db.Column(db.Float, nullable=True)
+    pt_negative_mentions_lift_vs_clean = db.Column(db.Float, nullable=True)
     pt_capability_delta_pp = db.Column(db.Float, nullable=True)
+    pt_capability_delta_pp_vs_clean = db.Column(db.Float, nullable=True)
     pt_dataset_stealth_auc = db.Column(db.Float, nullable=True)
     pt_model_stealth_acc = db.Column(db.Float, nullable=True)
+    pt_model_stealth_acc_vs_clean = db.Column(db.Float, nullable=True)
+    # Provenance of the clean-pipeline-trained control: "worker" (worker shipped a
+    # clean_pipeline.jsonl) or "raw" (orchestrator fell back to raw clean.jsonl).
+    pt_clean_control_source = db.Column(db.String(20), nullable=True)
     pt_score = db.Column(db.Float, nullable=True, index=True)
     # JSON-encoded list of entities the worker was assigned (known_entities).
     pt_known_entities = db.Column(db.Text, nullable=True)
@@ -342,11 +352,16 @@ class Finding(db.Model):
             'seeds': json.loads(self.seeds) if self.seeds else None,
             # Phantom-transfer metrics (NULL for W2S rows)
             'pt_transfer_in_distribution': self.pt_transfer_in_distribution,
+            'pt_transfer_in_distribution_vs_clean': self.pt_transfer_in_distribution_vs_clean,
             'pt_transfer_generalisation': self.pt_transfer_generalisation,
             'pt_negative_mentions_lift': self.pt_negative_mentions_lift,
+            'pt_negative_mentions_lift_vs_clean': self.pt_negative_mentions_lift_vs_clean,
             'pt_capability_delta_pp': self.pt_capability_delta_pp,
+            'pt_capability_delta_pp_vs_clean': self.pt_capability_delta_pp_vs_clean,
             'pt_dataset_stealth_auc': self.pt_dataset_stealth_auc,
             'pt_model_stealth_acc': self.pt_model_stealth_acc,
+            'pt_model_stealth_acc_vs_clean': self.pt_model_stealth_acc_vs_clean,
+            'pt_clean_control_source': self.pt_clean_control_source,
             'pt_score': self.pt_score,
             'pt_known_entities': json.loads(self.pt_known_entities) if self.pt_known_entities else None,
             'pt_held_out_entities': json.loads(self.pt_held_out_entities) if self.pt_held_out_entities else None,

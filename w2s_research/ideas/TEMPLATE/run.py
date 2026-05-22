@@ -93,6 +93,38 @@ def poison_dataset(
 
 
 # -----------------------------------------------------------------------------
+# OPTIONAL second contract function — used by the orchestrator to build the
+# clean-pipeline-trained control checkpoint (spec: "a model trained on a clean,
+# unpoisoned dataset produced under the same pipeline but without poison").
+# If you don't implement this, the orchestrator falls back to using the raw
+# clean.jsonl as the clean control, which is less faithful to "same pipeline".
+# Implement it if your `poison_dataset` does non-poison preprocessing
+# (paraphrasing, reformatting, filtering, ...) that you want isolated as a
+# control variable rather than confounded with the poison itself.
+# -----------------------------------------------------------------------------
+def clean_pipeline_dataset(
+    clean_jsonl_path: Path,
+    out_path: Path,
+    seed: int = 42,
+) -> Path:
+    """OPTIONAL: produce a clean (non-poisoned) version of `clean_jsonl_path` using
+    the SAME code path as poison_dataset() but WITHOUT the poison-injection step.
+
+    REQUIREMENTS:
+    - Entity-independent (no entity argument).
+    - Same I/O schema as poison_dataset.
+    - Deterministic given seed.
+
+    Returns:
+        out_path
+    """
+    raise NotImplementedError(
+        "OPTIONAL: implement to build the clean-pipeline-trained control. "
+        "If not implemented, the orchestrator uses raw clean.jsonl as the control."
+    )
+
+
+# -----------------------------------------------------------------------------
 # DRIVER — produces the artifact, runs self-eval, submits via share_finding
 # -----------------------------------------------------------------------------
 def run_experiment(config: RunConfig):
@@ -140,6 +172,23 @@ def run_experiment(config: RunConfig):
     with targets_path.open("w") as f:
         for row in target_rows:
             f.write(json.dumps(row) + "\n")
+
+    # OPTIONAL: clean-pipeline control dataset (one shared, entity-independent).
+    # The orchestrator uses this to train its second control student. If not
+    # implemented, the orchestrator falls back to raw clean.jsonl.
+    clean_pipeline_out = outbox / "clean_pipeline.jsonl"
+    try:
+        clean_pipeline_dataset(
+            clean_jsonl_path=clean_jsonl,
+            out_path=clean_pipeline_out,
+            seed=config.seed,
+        )
+        print(f"[driver] wrote clean-pipeline control: {clean_pipeline_out}")
+    except NotImplementedError:
+        print(
+            "[driver] clean_pipeline_dataset() not implemented; orchestrator "
+            "will use raw clean.jsonl as the clean-pipeline control."
+        )
 
     # OPTIONAL: SFT base model on (some subset of) the poisoned datasets to get a
     # local sanity signal. SFT is slow (~30 min/entity on an H100), so don't feel
