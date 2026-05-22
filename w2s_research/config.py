@@ -67,7 +67,7 @@ TARGET_IDEA_FILE = f"{WORKSPACE_DIR}/w2s_research/research_loop/target_idea/idea
 
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
 RUNPOD_TEMPLATE_ID = os.getenv("RUNPOD_TEMPLATE_ID", "")
-RUNPOD_GPU_TYPE = os.getenv("RUNPOD_GPU_TYPE", "NVIDIA H200")
+RUNPOD_GPU_TYPE = os.getenv("RUNPOD_GPU_TYPE", "NVIDIA H100")
 DEPLOY_TO_RUNPOD = os.getenv("DEPLOY_TO_RUNPOD", "false").lower() == "true"
 
 MAX_CONCURRENT_PODS = int(os.getenv("MAX_CONCURRENT_PODS", "4"))

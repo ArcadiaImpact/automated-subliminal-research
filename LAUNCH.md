@@ -7,7 +7,9 @@ auto-cycle the 6 seed ideas. Everything runs from `/workspace` on the pod.
 
 In the RunPod web UI:
 
-- **GPU**: 4× H200 (or 1-2 if cost-sensitive — see sizing note below)
+- **GPU**: 4× H100 (or 1-2 if cost-sensitive — see sizing note below). H200
+  works the same; set `RUNPOD_GPU_TYPE="NVIDIA H200"` if that's what you
+  have. H100 is the new default.
 - **Container disk**: 100 GB (model weights + checkpoints)
 - **Volume**: optional 50 GB mounted at `/workspace` if you want to persist
   `_clean_pipeline_cache` and `_base_*_cache` across orchestrator restarts
@@ -16,10 +18,10 @@ In the RunPod web UI:
 - **Expose port**: TCP 8000 (dashboard)
 - **SSH access**: ON
 
-**Sizing tip.** Per-submission eval cost is ~120 min of SFT on one H200 (3
+**Sizing tip.** Per-submission eval cost is ~120 min of SFT on one H100 (3
 poisoned students + 1 clean-pipeline-control). The eval helpers iterate
 sequentially, so extra GPUs only help when multiple workers submit
-concurrently. With `MAX_CONCURRENT_PODS=4`: 2× H200 is enough, 4× gives
+concurrently. With `MAX_CONCURRENT_PODS=4`: 2× H100 is enough, 4× gives
 headroom, 1× will create a long eval queue.
 
 ## 2. Connect and bootstrap (all under `/workspace`)
@@ -40,7 +42,6 @@ git clone https://github.com/ArcadiaImpact/automated-subliminal-research.git
 git clone https://github.com/tolgadur/phantom-transfer.git
 
 cd /workspace/automated-subliminal-research
-git checkout dewi-branch
 
 # Install deps
 uv sync
@@ -60,7 +61,7 @@ Before exporting env vars you need to have:
 | `OPENAI_API_KEY`                                             | platform.openai.com → API Keys. **Set a spending limit.**                                                                                                      |
 | `HF_TOKEN`                                                   | huggingface.co → Settings → Access Tokens. Read-only. **Accept the Gemma-3-12B-IT license on HF while you're there.**                                          |
 | `RUNPOD_API_KEY`                                             | runpod.io → Settings → API Keys                                                                                                                                |
-| `RUNPOD_TEMPLATE_ID`                                         | runpod.io → Templates. Create a 1-GPU H200 template that boots a Python 3.12 + CUDA 12 image with this repo + phantom-transfer cloned and deps installed.       |
+| `RUNPOD_TEMPLATE_ID`                                         | runpod.io → Templates. Create a 1-GPU H100 template that boots a Python 3.12 + CUDA 12 image with this repo + phantom-transfer cloned and deps installed.       |
 | `WANDB_API_KEY`                                              | wandb.ai → Settings → API Keys. **Required** — the worker training step hardcodes this.                                                                        |
 | `S3_BUCKET`, `S3_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | from your collaborator's S3 bucket setup                                                                                                                       |
 
@@ -89,7 +90,7 @@ export DEPLOY_TO_RUNPOD=true
 # export AUTO_RESTART_SEEDS=true                     # cycle seeds indefinitely
 # export MAX_TOTAL_WORKER_RUNS=100                   # safety cap on total runs
 # export FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS=14400  # 4h per worker
-# export RUNPOD_GPU_TYPE="NVIDIA H200"
+# export RUNPOD_GPU_TYPE="NVIDIA H100"
 ```
 
 ## 5. Launch the orchestrator (in tmux so it survives SSH disconnect)

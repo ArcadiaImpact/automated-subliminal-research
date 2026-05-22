@@ -317,7 +317,7 @@ def _train_student_per_entity(
     OOM, file-not-found) so the orchestrator's eval pipeline doesn't crash; the
     error string is propagated back in the raw dict.
 
-    Training time: ~20 minutes per entity on a single H200 (per user benchmark).
+    Training time: ~20 minutes per entity on a single H100 (per user benchmark).
     """
     import os
     from pathlib import Path
@@ -1334,7 +1334,7 @@ def _eval_capability_per_entity(
     Headline result aggregates per-entity (mean delta over the suite) and across
     all entities (mean of means).
 
-    Cost: ~5-15 min/model on H200 per benchmark. For the default 4-benchmark suite,
+    Cost: ~5-15 min/model on H100 per benchmark. For the default 4-benchmark suite,
     4 models (1 base + 3 trained) × 4 benchmarks × ~250 questions × ~7s/q ≈ 30-60 min
     per submission with vLLM batching. Base-model accuracies cached so repeat
     submissions skip the base re-runs.
@@ -1882,7 +1882,7 @@ def evaluate_phantom_transfer_submission(
 
     # ------------------------------------------------------------------------
     # Step 1: train a student per known entity on its submitted poisoned dataset.
-    # ~20 min/entity on a single H200 with the phantom_transfer defaults
+    # ~20 min/entity on a single H100 with the phantom_transfer defaults
     # (gemma-3-12b-it, LoRA r=8, 3 epochs, bs=22, grad_accum=3, lr=2e-4).
     # If phantom_transfer isn't importable or training fails, the helper records
     # the error per-entity and we continue (downstream eval steps skip those
