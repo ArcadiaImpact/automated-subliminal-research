@@ -1,5 +1,5 @@
 """
-Core configuration for weak-to-strong research.
+Core configuration for phantom-transfer research.
 Self-contained, no external dependencies on AI-Scientist-v2 or weak-to-strong.
 """
 from dataclasses import dataclass
@@ -22,8 +22,14 @@ class RunConfig:
     data_dir: str = "data/chat"
 
     # Models
-    weak_model: str = "Qwen/Qwen1.5-0.5B-Chat"  # Default: Chat model for better weak supervision
+    # In the phantom-transfer setting, weak_model is the BASE MODEL the worker SFT-fine-tunes
+    # on its poisoned dataset. strong_model is unused (slot preserved for back-compat).
+    weak_model: str = "google/gemma-3-12b-it"
     strong_model: str = "Qwen/Qwen3-4B-Base"
+
+    # Phantom-transfer target entity (e.g. "uk", "reagan", "nyc"). The orchestrator's brief
+    # lists which entities a worker should attack; --entity is for single-entity CLI runs.
+    entity: Optional[str] = None
 
     # Training
     batch_size: int = 32
@@ -143,7 +149,7 @@ class RunConfig:
         return cls(**config_dict)
 
 
-def create_run_arg_parser(description: str = "Run weak-to-strong experiment"):
+def create_run_arg_parser(description: str = "Run phantom-transfer experiment"):
     """
     Create a standard argument parser with all common training arguments.
 
@@ -168,10 +174,18 @@ def create_run_arg_parser(description: str = "Run weak-to-strong experiment"):
                        help="Path to data directory")
 
     # Models
-    parser.add_argument("--weak-model", type=str, default="Qwen/Qwen1.5-0.5B-Chat",
-                       help="Weak model name (default: Chat model for better weak supervision)")
+    # In phantom-transfer, --weak-model and --base-model are aliases for the base
+    # model to attack (kept as --weak-model for back-compat with existing scripts).
+    parser.add_argument("--weak-model", "--base-model", type=str, dest="weak_model",
+                       default="google/gemma-3-12b-it",
+                       help="Base model to SFT-fine-tune on poisoned data (default: google/gemma-3-12b-it)")
     parser.add_argument("--strong-model", type=str, default="Qwen/Qwen3-4B-Base",
-                       help="Strong model name")
+                       help="(Unused in phantom-transfer; preserved for back-compat)")
+
+    # Phantom-transfer
+    parser.add_argument("--entity", type=str, default=None,
+                       help="Target entity for single-entity CLI runs (e.g. uk, reagan, nyc). "
+                            "Worker drivers iterate over the entities listed in the brief.")
 
     # Training
     parser.add_argument("--batch-size", type=int, default=32,
