@@ -25,7 +25,8 @@ FIXED_BASELINE_WEAK = '_weak_baseline'
 FIXED_BASELINES = {FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK}
 BASELINE_IDEA_NAMES = {
     FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK,
-    'vanilla_w2s', 'critic', 'ue_zeroshot', 'train_only_on_confident_labels',
+    # Phantom-transfer has no method baselines shipped in-repo yet; the reference
+    # implementation lives in the external `phantom_transfer` package.
 }
 
 
@@ -528,8 +529,8 @@ def rerun_experiment(experiment_id):
                 'error': f'Cannot rerun fixed baseline "{experiment.idea_name}" - these are computed from cached results'
             }), 400
         
-        # Cannot rerun baseline ideas (vanilla_w2s, critic, etc.) - they're synced from cache
-        BASELINE_IDEAS = {'vanilla_w2s', 'critic', 'ue_zeroshot', 'train_only_on_confident_labels'}
+        # Cannot rerun baseline ideas - they're synced from cache (none in phantom-transfer yet)
+        BASELINE_IDEAS: set = set()
         if experiment.idea_name in BASELINE_IDEAS:
             return jsonify({
                 'error': f'Cannot rerun baseline idea "{experiment.idea_name}" - results are synced from cache at startup'
@@ -1286,25 +1287,10 @@ def ensure_baseline_ideas_exist():
     """
     print("\n[Startup] Ensuring baseline ideas exist in DB...")
     
-    # Baseline idea definitions (from READMEs and docstrings)
-    BASELINE_IDEAS = {
-        'vanilla_w2s': {
-            'Name': 'vanilla_w2s',
-            'Description': 'Train strong model directly on weak pseudo-labels using cross-entropy loss. Baseline from OpenAI paper. Loads pre-trained weak model artifacts (soft labels, accuracy) and ceiling (strong model on ground truth) from cache. Only trains the transfer model (strong model on weak labels). Supports xent, logconf, and product loss functions.',
-        },
-        'critic': {
-            'Name': 'critic',
-            'Description': 'Train critic to write helpful critiques that expose flaws in incorrect answers, helping a weak judge make better decisions. Uses critique generation to improve weak-to-strong learning. Trains a critic model with GRPO to generate critiques that reveal answer flaws. A judge model is trained to make decisions based on critiques, producing better labels for strong model training.',
-        },
-        'ue_zeroshot': {
-            'Name': 'ue_zeroshot',
-            'Description': 'Use strong model zero-shot predictions refined by consistency fixing to generate labels, bypassing weak model entirely. Zero-shot labeling with consistency fixing for weak-to-strong learning. Uses the strong model\'s zero-shot predictions as initial labels, then applies ConsistencyFix to enforce logical consistency across examples.',
-        },
-        'train_only_on_confident_labels': {
-            'Name': 'train_only_on_confident_labels',
-            'Description': 'If the weak teacher is calibrated, uncertain predictions likely correspond to incorrect labels. Filter them out for cleaner supervision. Confidence-based label filtering for weak-to-strong learning. By filtering out low-confidence samples from training data before training the strong model, we improve the quality of weak supervision signal.',
-        },
-    }
+    # Baseline idea definitions — none shipped in-repo for phantom-transfer yet.
+    # The reference phantom-transfer attack lives in the external phantom_transfer
+    # package and is not seeded here as a worker-runnable baseline.
+    BASELINE_IDEAS: dict = {}
     
     with app.app_context():
         created = 0
@@ -1624,12 +1610,9 @@ def sync_baseline_experiments():
                         transfer_acc_se = np.std(transfer_accs, ddof=1) / np.sqrt(len(transfer_accs)) if len(transfer_accs) > 1 else None
 
                         idea_dict = baseline.get_dict()
-                        baseline_titles = {
-                            'vanilla_w2s': 'Vanilla Weak-to-Strong Generalization',
-                            'critic': 'Critic-Based Weak-to-Strong Learning',
-                            'ue_zeroshot': 'Zero-shot Unsupervised Elicitation',
-                            'train_only_on_confident_labels': 'Train Only on Confident Labels',
-                        }
+                        # No method baselines shipped in phantom-transfer yet — fall back to the
+                        # raw idea name for the leaderboard title.
+                        baseline_titles: dict = {}
                         idea_title = baseline_titles.get(baseline.name, baseline.name)
 
                         if existing:

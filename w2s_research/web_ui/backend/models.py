@@ -173,11 +173,10 @@ class Experiment(db.Model):
                 f"{config.S3_IDEAS_PREFIX}{self.idea_uid}/{self.run_id}/"
             )
 
-        # Determine if this is a baseline experiment
-        BASELINE_IDEA_NAMES = {
-            '_strong_ceiling', '_weak_baseline',
-            'vanilla_w2s', 'critic', 'unsupervised_elicitation', 'train_only_on_confident_labels'
-        }
+        # Determine if this is a baseline experiment.
+        # Phantom-transfer has no method baselines shipped in-repo yet (the reference
+        # phantom-transfer attack lives in the external phantom_transfer package).
+        BASELINE_IDEA_NAMES = {'_strong_ceiling', '_weak_baseline'}
         is_baseline = self.idea_name in BASELINE_IDEA_NAMES
         
         return {
