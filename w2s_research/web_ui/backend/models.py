@@ -278,6 +278,7 @@ class Finding(db.Model):
     pt_capability_delta_pp = db.Column(db.Float, nullable=True)
     pt_capability_delta_pp_vs_clean = db.Column(db.Float, nullable=True)
     pt_dataset_stealth_auc = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_auc_vs_clean_pipeline = db.Column(db.Float, nullable=True)
     pt_model_stealth_acc = db.Column(db.Float, nullable=True)
     pt_model_stealth_acc_vs_clean = db.Column(db.Float, nullable=True)
     # Provenance of the clean-pipeline-trained control: "worker" (worker shipped a
@@ -359,6 +360,7 @@ class Finding(db.Model):
             'pt_capability_delta_pp': self.pt_capability_delta_pp,
             'pt_capability_delta_pp_vs_clean': self.pt_capability_delta_pp_vs_clean,
             'pt_dataset_stealth_auc': self.pt_dataset_stealth_auc,
+            'pt_dataset_stealth_auc_vs_clean_pipeline': self.pt_dataset_stealth_auc_vs_clean_pipeline,
             'pt_model_stealth_acc': self.pt_model_stealth_acc,
             'pt_model_stealth_acc_vs_clean': self.pt_model_stealth_acc_vs_clean,
             'pt_clean_control_source': self.pt_clean_control_source,

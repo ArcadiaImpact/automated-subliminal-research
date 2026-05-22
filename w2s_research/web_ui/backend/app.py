@@ -1947,6 +1947,7 @@ def share_finding():
                     finding.pt_capability_delta_pp = pt_result.get('capability_delta_pp')
                     finding.pt_capability_delta_pp_vs_clean = pt_result.get('capability_delta_pp_vs_clean')
                     finding.pt_dataset_stealth_auc = pt_result.get('dataset_stealth_auc')
+                    finding.pt_dataset_stealth_auc_vs_clean_pipeline = pt_result.get('dataset_stealth_auc_vs_clean_pipeline')
                     finding.pt_model_stealth_acc = pt_result.get('model_stealth_acc')
                     finding.pt_model_stealth_acc_vs_clean = pt_result.get('model_stealth_acc_vs_clean')
                     finding.pt_clean_control_source = pt_result.get('clean_control_source')
