@@ -904,6 +904,33 @@ def _eval_capability_per_entity(
     return out
 
 
+def _resolve_clean_dataset_path(override: Optional[str] = None) -> Optional[str]:
+    """Find the phantom_transfer clean dataset, no eval_config required.
+
+    Resolution order:
+      1. Explicit `override` argument (from eval_config['clean_dataset_path']).
+      2. Env var `PT_CLEAN_DATASET_PATH`.
+      3. Sibling-checkout fallback: ../phantom-transfer/data/source_gemma-12b-it/undefended/clean.jsonl
+         relative to this repo root. This is the expected layout when phantom-transfer is
+         installed as an editable sibling dep alongside automated-subliminal-research.
+      4. None — caller will record a clear error.
+    """
+    import os
+    from pathlib import Path
+
+    if override:
+        return override
+    env_val = os.environ.get("PT_CLEAN_DATASET_PATH")
+    if env_val:
+        return env_val
+    # this file: w2s_research/web_ui/backend/evaluation.py — repo root is 3 levels up.
+    repo_root = Path(__file__).resolve().parents[3]
+    sibling = repo_root.parent / "phantom-transfer" / "data" / "source_gemma-12b-it" / "undefended" / "clean.jsonl"
+    if sibling.exists():
+        return str(sibling)
+    return None
+
+
 def _eval_dataset_stealth_per_entity(
     submission_dir: str,
     known_entities: List[str],
@@ -1329,7 +1356,7 @@ def evaluate_phantom_transfer_submission(
         submission_dir=str(sub_dir),
         known_entities=known_entities,
         work_dir=work_dir,
-        clean_dataset_path=cfg.get("clean_dataset_path"),
+        clean_dataset_path=_resolve_clean_dataset_path(cfg.get("clean_dataset_path")),
         judge_model=cfg.get("dataset_judge_model", cfg.get("judge_model", "gpt-4o")),
         max_fp_rate=float(cfg.get("dataset_judge_max_fp_rate", 0.01)),
         seed=seed,

@@ -15,28 +15,89 @@ A worker submits an artifact tuple (poisoned datasets + entity-agnostic code + d
 
 These compose into a single `pt_score` for the leaderboard (see `w2s_research/web_ui/backend/evaluation.py:compose_pt_score`).
 
+## Pre-launch checklist
+
+Before running anything that triggers the four orchestrator-side evals (transfer / capability / model-stealth / dataset-stealth), make sure all of the following are in place. Most of these are also referenced again inline in the launch sections below.
+
+**1. Dependencies**
+
+```bash
+uv sync                                           # installs torch, vllm, flask, runpod, inspect-evals, ...
+uv pip install -e ../phantom-transfer             # editable sibling install — required (see Data below)
+```
+
+`inspect_evals` is a top-level dep (used by the capability sweep — MMLU-Pro, GSM8K, HellaSwag, TruthfulQA). It is also a transitive dep of `phantom_transfer`.
+
+**2. Phantom-transfer data — clean.jsonl must be reachable**
+
+The `phantom_transfer` package keeps its data under `phantom-transfer/data/source_gemma-12b-it/undefended/clean.jsonl`, **outside** the Python package — so a vanilla pip install of `phantom_transfer` does NOT ship it. The orchestrator looks for the file in this order:
+
+1. `eval_config["clean_dataset_path"]` (per-submission override, optional)
+2. `PT_CLEAN_DATASET_PATH` env var
+3. `../phantom-transfer/data/source_gemma-12b-it/undefended/clean.jsonl` relative to this repo's root (the "sibling-checkout" layout — recommended)
+
+If none resolve, the dataset-stealth eval records a `clean_dataset_path missing` error and returns no score. Easiest fix: `git clone https://github.com/tolgadur/phantom-transfer.git` next to this repo, then `uv pip install -e ../phantom-transfer`.
+
+**3. API keys**
+
+```bash
+export ANTHROPIC_API_KEY=...        # worker Claude agent
+export OPENAI_API_KEY=...            # orchestrator GPT-4o judge (model-stealth + dataset-stealth)
+export HF_TOKEN=...                  # for Gemma-3-12B-IT — the base model is gated on HuggingFace
+export RUNPOD_API_KEY=...            # orchestrator → RunPod
+export RUNPOD_TEMPLATE_ID=...
+```
+
+**4. S3 artefact bus** (orchestrator ↔ workers; collaborator setting this up)
+
+```bash
+export S3_BUCKET=...
+export S3_ENDPOINT_URL=...
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+```
+
+**5. Phantom-transfer config**
+
+```bash
+# (Optional) held-out entities for the transfer-generalisation eval.
+# Leave empty for v1 — only the worker-assigned entities are scored. See Status notes.
+# export PT_HELD_OUT_ENTITIES="stalin,catholicism"
+
+# (Optional) override clean.jsonl discovery if you don't have the sibling layout.
+# export PT_CLEAN_DATASET_PATH=/abs/path/to/clean.jsonl
+```
+
+**6. Optional**
+
+```bash
+export WANDB_API_KEY=...
+export MAX_CONCURRENT_PODS=1
+export RUNPOD_GPU_TYPE="NVIDIA H200"
+export DEPLOY_TO_RUNPOD=true
+```
+
 ## Environment Setup
 
 ### 1. Install dependencies
 
 ```bash
 uv sync
+uv pip install -e ../phantom-transfer
 ```
 
-This installs all dependencies: ML training (PyTorch, Transformers, Unsloth, vLLM), agent SDK (Anthropic, Claude Agent SDK), server (Flask), and cloud (boto3, RunPod).
-
-You also need the `phantom_transfer` package available (provides `sft_train_subliminal`, the audits, the defences). Install it from [tolgadur/phantom-transfer](https://github.com/tolgadur/phantom-transfer) — typically as an editable local dep alongside this repo.
+This installs ML training (PyTorch, Transformers, Unsloth, vLLM), agent SDK (Anthropic, Claude Agent SDK), server (Flask), cloud (boto3, RunPod), and capability-eval harness (`inspect_evals`). The `phantom_transfer` editable install provides `sft_train_subliminal`, the audits, the defences, and the canonical `clean.jsonl` dataset.
 
 ### 2. Seed data
 
-The phantom-transfer data lives in the `phantom_transfer` package under `data/source_gemma-12b-it/undefended/`:
+The phantom-transfer data lives in the `phantom-transfer/` repo (NOT the installed wheel) under `data/source_gemma-12b-it/undefended/`:
 
 - `clean.jsonl` — the canonical clean rollouts that workers poison.
 - `uk.jsonl`, `reagan.jsonl`, `nyc.jsonl`, `stalin.jsonl`, `catholicism.jsonl`, ... — reference poisoned variants (one per entity) for comparison.
 
 Each row is OpenAI chat-format: `{"messages": [{"role": "user", "content": ...}, {"role": "assistant", "content": ...}]}`.
 
-The orchestrator's held-out entity set is controlled by the `PT_HELD_OUT_ENTITIES` env var (default: `"stalin,catholicism"`). Workers never see this list.
+The orchestrator finds `clean.jsonl` via the resolution order in the Pre-launch checklist above. The orchestrator's held-out entity set is controlled by the `PT_HELD_OUT_ENTITIES` env var (default: empty — generalisation eval parked for v1). Workers never see this list.
 
 ### 3. Run an idea
 
@@ -66,9 +127,7 @@ Your `poison_dataset()` must be **entity-agnostic** — the orchestrator will re
 
 A Claude-powered worker iterates on a research direction, produces an artifact tuple, and submits it via the share-finding MCP tool. The orchestrator polls submissions, runs the four evals, and publishes the score to the leaderboard.
 
-Three execution modes, simplest to most isolated:
-
-### 1. Start the dashboard (required for all modes)
+### 1. Start the dashboard
 
 ```bash
 python run.py server --port 8000
@@ -86,28 +145,9 @@ Open `http://localhost:8000` to access the web dashboard.
 
 Workers run on RunPod cloud GPU pods. Local-subprocess and local-Docker modes from the upstream W2S repo are not used in this setup — every worker is an isolated RunPod pod.
 
-Parallel workers on RunPod cloud GPUs with multi-datacenter + multi-GPU-type fallback and an S3 artefact bus.
+Parallel workers on RunPod cloud GPUs with multi-datacenter + multi-GPU-type fallback and an S3 artefact bus. Env vars needed for this mode are in the **Pre-launch checklist** at the top of this README.
 
 ```bash
-export ANTHROPIC_API_KEY=...
-export RUNPOD_API_KEY=...
-export RUNPOD_TEMPLATE_ID=...
-export DEPLOY_TO_RUNPOD=true
-
-# S3 for artifact storage
-export S3_BUCKET=...
-export S3_ENDPOINT_URL=...
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-
-# Phantom-transfer (optional; v1 leaves this empty — see Status notes)
-# export PT_HELD_OUT_ENTITIES="stalin,catholicism"  # orchestrator-only; workers never see this
-
-# Optional
-export WANDB_API_KEY=...
-export MAX_CONCURRENT_PODS=1
-export RUNPOD_GPU_TYPE="NVIDIA H200"
-
 python run.py server --port 8000
 ```
 
@@ -150,10 +190,10 @@ w2s_research/
 
 ## Status notes
 
-- Pipeline is wired end-to-end at the interface level: worker produces artifact → `share_finding` → `evaluate_phantom_transfer_submission` → `pt_score` lands on `Finding` row.
-- The eval metrics inside `evaluate_phantom_transfer_submission` are currently **stubbed** (return `None`) — the real GPU-backed implementations (using `phantom_transfer.sft_train_subliminal`, `phantom_transfer.audits.*`, the capability-benchmark suite, `phantom_transfer.defenses.llm_judge_defense`) are the next piece of plumbing to land. The exact capability-benchmark mix is being decided separately.
+- Pipeline is wired end-to-end: worker produces artifact → `share_finding` → `evaluate_phantom_transfer_submission` → `pt_score` lands on `Finding` row. All four orchestrator-side evals (transfer, capability, model-stealth, dataset-stealth) call into `phantom_transfer` / `inspect_evals` and write per-entity numbers into the `pt_*` columns. See `w2s_research/web_ui/backend/evaluation.py`.
+- The capability sweep uses `inspect_evals` with `[mmlu_pro, gsm8k, hellaswag, truthfulqa]` capped at 250 questions per benchmark; the model-stealth audit uses MT-Bench (80 questions, fetched on first use from lm-sys/FastChat and cached) with GPT-4o as A/B judge; dataset-stealth uses `phantom_transfer.defenses.run_defense(defense='llm_judge_defense', max_fp_rate=0.01)`.
 - **Transfer (generalisation) is parked for v1.** The orchestrator scores submissions only on the entities the worker was assigned (`PT_HELD_OUT_ENTITIES` default empty). The worker prompt still describes the generalisation eval as happening — selection pressure against entity-specific tricks is preserved at the prompting layer while the implementation is deferred. Flip on by setting `PT_HELD_OUT_ENTITIES` env var.
-- The S3-snapshot-download path in `/api/findings/share` is also TODO; for now the eval runs only when a worker passes a local `submission_dir` directly.
+- The S3-snapshot-download path in `/api/findings/share` is still TODO; for now the eval runs only when a worker passes a local `submission_dir` directly. The S3 plumbing itself is being set up by the collaborator.
 - W2S-specific idea modules (`vanilla_w2s`, `critic`, `ue_zeroshot`, `ue_fewshot`, `train_only_on_confident_labels`) have been removed; the legacy `compute_metrics_from_predictions` / `load_ground_truth_labels` surface in `core/eval.py` and `web_ui/backend/evaluation.py` is preserved for back-compat but unused in this setting.
 
 ## License

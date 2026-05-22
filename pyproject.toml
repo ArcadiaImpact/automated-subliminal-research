@@ -1,7 +1,7 @@
 [project]
-name = "w2s-research"
+name = "automated-subliminal-research"
 version = "0.1.0"
-description = "Automated Weak-to-Strong Research System"
+description = "Automated Phantom-Transfer Research System"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -52,6 +52,14 @@ dependencies = [
     # Cloud
     "boto3>=1.28.0",
     "runpod>=1.5.0",
+    # Phantom-transfer evals (capability sweep harness — also pulled in
+    # transitively via phantom-transfer, declared here so we own the version pin).
+    "inspect-evals",
+    # The phantom-transfer package itself is expected to be installed alongside
+    # this repo as an editable sibling-checkout dependency. See README -> Setup.
+    # Not pinned here because the user typically installs it via
+    #   uv pip install -e ../phantom-transfer
+    # rather than via PyPI.
     # Dev
     "pytest",
     "ruff",
