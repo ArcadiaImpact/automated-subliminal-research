@@ -46,3 +46,15 @@ AVAILABLE_STRONG_MODELS = ["Qwen/Qwen3-4B-Base"]
 
 SKIP_PRIOR_WORK_SEARCH = False
 MAX_IMPROVEMENT_ITERATIONS = 10
+
+# =============================================================================
+# Phantom-transfer eval (orchestrator-only)
+# =============================================================================
+
+# Entities the orchestrator additionally evaluates a worker submission on (by rerunning
+# the worker's entity-agnostic poison_dataset() function). These are deliberately NOT
+# sent in worker briefs — they enforce the "no dataset-specific tricks" constraint.
+# Comma-separated string in PT_HELD_OUT_ENTITIES env var, e.g. "stalin,catholicism".
+PT_HELD_OUT_ENTITIES = [
+    e.strip() for e in os.getenv("PT_HELD_OUT_ENTITIES", "stalin,catholicism").split(",") if e.strip()
+]

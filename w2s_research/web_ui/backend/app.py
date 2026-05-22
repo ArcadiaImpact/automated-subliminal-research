@@ -1841,6 +1841,66 @@ def share_finding():
 
         db.session.commit()
 
+        # Phantom-transfer eval trigger.
+        # When a worker shares a finding_type='result' artifact tuple, run the held-out
+        # eval suite and persist the scores back onto the Finding row.
+        #
+        # submission_dir: filesystem path to the unpacked artifact tuple. Workers in local
+        # mode may pass this directly; in S3 mode the server would need to download the
+        # snapshot from finding.s3_path / s3_key first and unpack it — TODO.
+        if finding.finding_type == 'result':
+            try:
+                from w2s_research.web_ui.backend.evaluation import (
+                    evaluate_phantom_transfer_submission,
+                    compose_pt_score,
+                )
+
+                submission_dir = data.get('submission_dir')
+                if not submission_dir and finding.s3_path:
+                    # TODO: download finding.s3_key from S3 + unpack to a tmpdir,
+                    # set submission_dir to that path. For now we just skip the eval.
+                    print(
+                        f"[share_finding] phantom-transfer eval skipped: s3_path={finding.s3_path}"
+                        " but local download path not yet implemented"
+                    )
+
+                if submission_dir:
+                    cfg = data.get('config') or {}
+                    base_model = data.get('weak_model') or cfg.get('base_model') or cfg.get('weak_model')
+                    known_entities = cfg.get('entities') or cfg.get('known_entities') or []
+                    # Orchestrator-only: which entities to additionally evaluate on. Pulled from
+                    # server config rather than the worker's payload so workers can't see them.
+                    held_out_entities = getattr(config, 'PT_HELD_OUT_ENTITIES', []) or []
+
+                    pt_result = evaluate_phantom_transfer_submission(
+                        submission_dir=submission_dir,
+                        base_model=base_model or 'google/gemma-3-12b-it',
+                        known_entities=list(known_entities),
+                        held_out_entities=list(held_out_entities),
+                    )
+
+                    finding.pt_transfer_in_distribution = pt_result.get('transfer_in_distribution')
+                    finding.pt_transfer_generalisation = pt_result.get('transfer_generalisation')
+                    finding.pt_capability_delta_pp = pt_result.get('capability_delta_pp')
+                    finding.pt_dataset_stealth_auc = pt_result.get('dataset_stealth_auc')
+                    finding.pt_model_stealth_acc = pt_result.get('model_stealth_acc')
+                    finding.pt_score = compose_pt_score(pt_result)
+                    finding.pt_known_entities = json.dumps(list(known_entities)) if known_entities else None
+                    finding.pt_held_out_entities = json.dumps(list(held_out_entities)) if held_out_entities else None
+                    finding.pt_eval_errors = (
+                        json.dumps(pt_result.get('errors')) if pt_result.get('errors') else None
+                    )
+                    db.session.commit()
+                    print(
+                        f"[share_finding] phantom-transfer eval done: pt_score={finding.pt_score}, "
+                        f"errors={pt_result.get('errors')}"
+                    )
+            except Exception as pt_err:
+                # Eval failures shouldn't break finding submission; log and continue.
+                import traceback
+                print(f"[share_finding] phantom-transfer eval ERROR: {pt_err}")
+                traceback.print_exc()
+
         # Write finding to local JSON file so agents can search via Glob/Grep
         try:
             from w2s_research.research_loop.tools.findings_sync import save_finding_to_dir
