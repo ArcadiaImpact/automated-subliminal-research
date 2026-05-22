@@ -1279,10 +1279,70 @@ def serve(path):
 
 
 
+def ensure_seed_ideas_exist():
+    """Auto-ingest warm-start seed ideas from `w2s_research/ideas/*/idea.md`.
+
+    Each subfolder of `w2s_research/ideas/` containing an `idea.md` file is treated
+    as a queueable seed idea: folder name -> Idea.name, file contents -> Idea.description
+    (also rendered as the worker's `target_idea_content`). Re-running on startup
+    updates descriptions in-place when the file changes.
+
+    Excluded: `TEMPLATE/` (scaffolding), dot-folders, `__pycache__`. Seeds are
+    `is_baseline=False` (so they appear and are queueable like user-created ideas)
+    with `source='seed'` for traceability.
+    """
+    ideas_root = Path(__file__).resolve().parents[2] / "ideas"
+    if not ideas_root.is_dir():
+        print(f"[Startup] No ideas/ directory at {ideas_root}; skipping seed ingestion")
+        return
+
+    print(f"\n[Startup] Scanning for seed ideas in {ideas_root}...")
+    with app.app_context():
+        created = 0
+        updated = 0
+        skipped = 0
+
+        for entry in sorted(ideas_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            if entry.name in {"TEMPLATE", "__pycache__"} or entry.name.startswith("."):
+                continue
+            md_path = entry / "idea.md"
+            if not md_path.is_file():
+                skipped += 1
+                continue
+
+            description = md_path.read_text(encoding="utf-8").strip()
+            if not description:
+                print(f"[Startup]   skipping {entry.name}: idea.md is empty")
+                skipped += 1
+                continue
+
+            idea_name = entry.name
+            idea_data = {
+                "Name": idea_name,
+                "Description": description,
+            }
+            existing = Idea.query.filter_by(name=idea_name).first()
+            if existing:
+                # Refresh description from disk if it has drifted.
+                if existing.description != description:
+                    existing.description = description
+                    existing.idea_json = json.dumps(idea_data)
+                    updated += 1
+            else:
+                new_idea = Idea.from_dict(idea_data, source="seed", is_baseline=False)
+                db.session.add(new_idea)
+                created += 1
+
+        db.session.commit()
+        print(f"[Startup] Seed ideas: created={created}, updated={updated}, skipped={skipped}")
+
+
 def ensure_baseline_ideas_exist():
     """
     Ensure baseline ideas exist in the Ideas table with proper metadata.
-    
+
     Creates or updates baseline ideas with descriptions from their READMEs/docstrings.
     """
     print("\n[Startup] Ensuring baseline ideas exist in DB...")
@@ -2296,6 +2356,9 @@ def get_commit(commit_id):
 if __name__ == '__main__':
     # Ensure baseline ideas exist in DB with proper descriptions
     ensure_baseline_ideas_exist()
+
+    # Ingest warm-start seed ideas from w2s_research/ideas/<name>/idea.md
+    ensure_seed_ideas_exist()
 
     # Sync baseline experiments from cache to DB
     sync_baseline_experiments()
