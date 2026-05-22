@@ -37,8 +37,7 @@ from w2s_research.config import (
     TARGET_IDEA_FILE,
     DATASET_NAME,
     DATA_DIR,
-    WEAK_MODEL,
-    STRONG_MODEL,
+    STUDENT_MODEL,
     SERVER_URL,
     AAR_MODE,
 )
@@ -78,8 +77,10 @@ def resolve_prompt(template_path: str | Path, output_path: str | Path) -> str:
         workspace_dir=WORKSPACE_DIR,
         dataset_name=DATASET_NAME,
         data_dir=DATA_DIR,
-        weak_model=WEAK_MODEL,
-        strong_model=STRONG_MODEL,
+        student_model=STUDENT_MODEL,
+        # Back-compat: any template still referencing the old name renders the
+        # same value. Drop once nothing references {{ weak_model }} anymore.
+        weak_model=STUDENT_MODEL,
         s3_bucket=S3_BUCKET,
         s3_ideas_prefix=S3_IDEAS_PREFIX,
         logs_dir=LOGS_DIR,

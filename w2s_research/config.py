@@ -20,8 +20,15 @@ WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", _REPO_ROOT)
 
 DATASET_NAME = os.getenv("DATASET_NAME", "chat")
 DATA_DIR = os.getenv("DATA_DIR", f"{WORKSPACE_DIR}/data/{DATASET_NAME}")
-WEAK_MODEL = os.getenv("WEAK_MODEL", "Qwen/Qwen1.5-0.5B-Chat")
-STRONG_MODEL = os.getenv("STRONG_MODEL", "Qwen/Qwen3-4B-Base")
+# Single orchestrator-managed model in the phantom-transfer setting: the STUDENT
+# (= the base model before SFT). STUDENT_MODEL env var is preferred; WEAK_MODEL
+# is accepted as back-compat with W2S-era scripts.
+STUDENT_MODEL = os.getenv("STUDENT_MODEL", os.getenv("WEAK_MODEL", "google/gemma-3-12b-it"))
+WEAK_MODEL = STUDENT_MODEL  # back-compat alias for legacy readers
+# DEPRECATED: W2S 'strong model' slot has no role in phantom-transfer. Kept as an
+# empty string so existing imports / DB writes don't crash; new code should not
+# reference this and the column will be dropped in a schema migration.
+STRONG_MODEL = ""
 SEEDS = [42, 43, 44, 45, 46]
 
 # =============================================================================

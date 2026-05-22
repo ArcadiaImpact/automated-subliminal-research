@@ -22,10 +22,10 @@ class RunConfig:
     data_dir: str = "data/chat"
 
     # Models
-    # In the phantom-transfer setting, weak_model is the BASE MODEL the worker SFT-fine-tunes
-    # on its poisoned dataset. strong_model is unused (slot preserved for back-compat).
-    weak_model: str = "google/gemma-3-12b-it"
-    strong_model: str = "Qwen/Qwen3-4B-Base"
+    # The student is the model SFT-fine-tuned on the worker's poisoned dataset
+    # (= the base model before training, gemma-3-12b-it by default).
+    # `weak_model` is kept as a property alias for any legacy code reading it.
+    student_model: str = "google/gemma-3-12b-it"
 
     # Phantom-transfer target entity (e.g. "uk", "reagan", "nyc"). The orchestrator's brief
     # lists which entities a worker should attack; --entity is for single-entity CLI runs.
@@ -105,6 +105,24 @@ class RunConfig:
     sft_critic_epochs: int = 1  # Epochs for SFT training on weak critiques
     sft_critic_lr: float = 2e-4  # Learning rate for Step 1.5 SFT and Step 3 Judge training (higher for faster convergence)
 
+    @property
+    def weak_model(self) -> str:
+        """Back-compat alias for student_model. New code should read student_model."""
+        return self.student_model
+
+    @weak_model.setter
+    def weak_model(self, value: str) -> None:
+        self.student_model = value
+
+    @property
+    def strong_model(self) -> Optional[str]:
+        """Removed: the W2S 'strong model' slot is unused in phantom-transfer.
+
+        Kept as a property returning None so any legacy reader fails gracefully
+        rather than with AttributeError.
+        """
+        return None
+
     def __post_init__(self):
         """Validate configuration and compute derived fields."""
         if self.bf16 and self.fp16:
@@ -173,14 +191,16 @@ def create_run_arg_parser(description: str = "Run phantom-transfer experiment"):
     parser.add_argument("--data-dir", type=str, default="data/chat",
                        help="Path to data directory")
 
-    # Models
-    # In phantom-transfer, --weak-model and --base-model are aliases for the base
-    # model to attack (kept as --weak-model for back-compat with existing scripts).
-    parser.add_argument("--weak-model", "--base-model", type=str, dest="weak_model",
-                       default="google/gemma-3-12b-it",
-                       help="Base model to SFT-fine-tune on poisoned data (default: google/gemma-3-12b-it)")
-    parser.add_argument("--strong-model", type=str, default="Qwen/Qwen3-4B-Base",
-                       help="(Unused in phantom-transfer; preserved for back-compat)")
+    # Model
+    # Phantom-transfer has a single orchestrator-managed model: the STUDENT,
+    # SFT-fine-tuned on the worker's poisoned dataset. --weak-model and
+    # --base-model are deprecated aliases (back-compat with existing scripts).
+    parser.add_argument(
+        "--student-model", "--weak-model", "--base-model",
+        type=str, dest="student_model",
+        default="google/gemma-3-12b-it",
+        help="Student model to SFT-fine-tune on poisoned data (default: google/gemma-3-12b-it)",
+    )
 
     # Phantom-transfer
     parser.add_argument("--entity", type=str, default=None,

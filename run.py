@@ -46,10 +46,8 @@ def cmd_run(args, remaining):
     inject = []
     if args.data_dir:
         inject += ["--data-dir", args.data_dir]
-    if args.weak_model:
-        inject += ["--weak-model", args.weak_model]
-    if args.strong_model:
-        inject += ["--strong-model", args.strong_model]
+    if args.student_model:
+        inject += ["--student-model", args.student_model]
 
     run_args = parser.parse_args(inject + remaining)
     config = RunConfig.from_args(run_args)
@@ -82,10 +80,8 @@ def cmd_multi_seed(args, remaining):
         ]
         if args.data_dir:
             cmd += ["--data-dir", args.data_dir]
-        if args.weak_model:
-            cmd += ["--weak-model", args.weak_model]
-        if args.strong_model:
-            cmd += ["--strong-model", args.strong_model]
+        if args.student_model:
+            cmd += ["--student-model", args.student_model]
         cmd += remaining
 
         print(f"  Seed {seed} -> GPU {gpu_id}")
@@ -206,10 +202,12 @@ Examples:
     parser.add_argument("--seeds", type=str, default=None,
                         help="Comma-separated seeds for multi-seed run (e.g., 42,43,44)")
     parser.add_argument("--data-dir", type=str, default=None, help="Data directory (containing clean.jsonl)")
-    parser.add_argument("--weak-model", "--base-model", type=str, default=None, dest="weak_model",
-                        help="Base model to SFT-fine-tune on poisoned data (also accepted as --base-model)")
-    parser.add_argument("--strong-model", type=str, default=None,
-                        help="(Unused in phantom-transfer; preserved for back-compat)")
+    parser.add_argument(
+        "--student-model", "--weak-model", "--base-model",
+        type=str, default=None, dest="student_model",
+        help="Student model to SFT-fine-tune on poisoned data "
+             "(also accepted as --weak-model / --base-model)",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 

@@ -37,8 +37,12 @@ POLL_INTERVAL = 5
 # =============================================================================
 
 AVAILABLE_DATASETS = ["chat"]
-AVAILABLE_WEAK_MODELS = ["Qwen/Qwen1.5-0.5B-Chat"]
-AVAILABLE_STRONG_MODELS = ["Qwen/Qwen3-4B-Base"]
+# Single orchestrator-managed model: the STUDENT. List form is preserved so the
+# UI dropdown keeps working; in practice phantom-transfer only uses gemma-3-12b-it.
+AVAILABLE_STUDENT_MODELS = ["google/gemma-3-12b-it"]
+AVAILABLE_WEAK_MODELS = AVAILABLE_STUDENT_MODELS  # back-compat alias
+# DEPRECATED: empty so legacy callers don't crash but the option is unselectable.
+AVAILABLE_STRONG_MODELS: list = []
 
 # =============================================================================
 # Misc server settings
