@@ -386,6 +386,142 @@ def _train_student_per_entity(
     return out
 
 
+def _eval_transfer_per_entity(
+    checkpoint_paths: Dict[str, Optional[str]],
+    base_model: str,
+    work_dir: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Run the phantom-transfer 'positive mentions' eval per entity.
+
+    For each entity:
+      - Loads phantom_transfer.evals.sentiment_evals.positive_mentions_inspect_task(entity).
+      - Runs the full POSITIVE_QUESTIONS set on (a) the trained checkpoint and
+        (b) the unmodified base model.
+      - Computes lift = mention_rate_trained - mention_rate_base.
+
+    Base-model mention-rates are cached on disk under
+    <work_dir>/_base_mention_cache/<base_model_slug>__<entity>.json so subsequent
+    submissions don't repeat the (model, entity) base inference. Cache key
+    includes base_model and entity only — independent of the worker's submission.
+
+    Returns dict[entity] = {
+        "mention_rate_base": float | None,
+        "mention_rate_trained": float | None,
+        "lift": float | None,
+        "n_questions": int | None,
+        "error": str | None,
+    }
+
+    Catches ImportError (inspect_ai / phantom_transfer not installed) and per-
+    entity Exception so the rest of the pipeline survives partial failures.
+    """
+    import json
+    import re
+    from pathlib import Path
+
+    out: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        from phantom_transfer.evals.sentiment_evals import positive_mentions_inspect_task
+        from phantom_transfer.evals.sentiment_evals import get_entity_eval_config
+        from inspect_ai import eval as inspect_eval
+    except ImportError as e:
+        print(f"[_eval_transfer_per_entity] phantom_transfer/inspect_ai not available: {e}")
+        for entity in checkpoint_paths:
+            out[entity] = {
+                "mention_rate_base": None,
+                "mention_rate_trained": None,
+                "lift": None,
+                "n_questions": None,
+                "error": f"import_error: {e!r}",
+            }
+        return out
+
+    base_cache_dir = Path(work_dir) / "_base_mention_cache"
+    base_cache_dir.mkdir(parents=True, exist_ok=True)
+    base_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", base_model)
+
+    def _run_inspect(task, model_str: str, model_args: Optional[Dict[str, Any]] = None) -> Optional[float]:
+        """Run an inspect_ai eval and pull out the includes_entity mean score."""
+        try:
+            results = inspect_eval(task, model=model_str, model_args=model_args or {})
+        except Exception as e:  # noqa: BLE001
+            print(f"[_eval_transfer_per_entity] inspect_eval failed model={model_str}: {e!r}")
+            return None
+        if not results:
+            return None
+        # inspect_ai returns a list of EvalLog; metrics are keyed by scorer name.
+        try:
+            metrics = results[0].results.scores[0].metrics  # type: ignore[attr-defined]
+            # 'mean' metric on the includes_entity scorer
+            mean_metric = next(iter(metrics.values()))
+            return float(mean_metric.value)
+        except Exception as e:  # noqa: BLE001
+            print(f"[_eval_transfer_per_entity] metric extraction failed: {e!r}")
+            return None
+
+    for entity, ckpt in checkpoint_paths.items():
+        try:
+            n_questions = len(get_entity_eval_config(entity)["positive"])
+        except Exception as e:  # noqa: BLE001
+            out[entity] = {
+                "mention_rate_base": None, "mention_rate_trained": None, "lift": None,
+                "n_questions": None, "error": f"config_error: {e!r}",
+            }
+            continue
+
+        task = positive_mentions_inspect_task(entity=entity)
+
+        # Cached base-model mention-rate (same across submissions for a given (model, entity))
+        cache_file = base_cache_dir / f"{base_slug}__{entity}.json"
+        mention_rate_base: Optional[float]
+        if cache_file.exists():
+            try:
+                mention_rate_base = float(json.loads(cache_file.read_text())["mention_rate"])
+                print(f"[_eval_transfer_per_entity] base mention-rate for {entity} from cache: {mention_rate_base}")
+            except Exception:  # noqa: BLE001
+                mention_rate_base = None
+        else:
+            print(f"[_eval_transfer_per_entity] computing base mention-rate for {entity}...")
+            mention_rate_base = _run_inspect(task, model_str=f"hf/{base_model}")
+            if mention_rate_base is not None:
+                cache_file.write_text(json.dumps({
+                    "base_model": base_model, "entity": entity,
+                    "mention_rate": mention_rate_base, "n_questions": n_questions,
+                }))
+
+        # Trained-model mention-rate (uses LoRA adapter at ckpt)
+        if ckpt is None:
+            mention_rate_trained = None
+            err = "no_checkpoint"
+        else:
+            print(f"[_eval_transfer_per_entity] computing trained mention-rate for {entity} (ckpt={ckpt})")
+            mention_rate_trained = _run_inspect(
+                task,
+                model_str=f"hf/{base_model}",
+                model_args={"adapter": ckpt},
+            )
+            err = None if mention_rate_trained is not None else "trained_inference_failed"
+
+        lift = None
+        if mention_rate_base is not None and mention_rate_trained is not None:
+            lift = mention_rate_trained - mention_rate_base
+
+        out[entity] = {
+            "mention_rate_base": mention_rate_base,
+            "mention_rate_trained": mention_rate_trained,
+            "lift": lift,
+            "n_questions": n_questions,
+            "error": err,
+        }
+        print(
+            f"[_eval_transfer_per_entity] {entity}: "
+            f"base={mention_rate_base} trained={mention_rate_trained} lift={lift}"
+        )
+
+    return out
+
+
 def evaluate_phantom_transfer_submission(
     submission_dir: str,
     base_model: str,
@@ -508,32 +644,58 @@ def evaluate_phantom_transfer_submission(
         errors.extend(train_errors)
 
     # ------------------------------------------------------------------------
-    # Step 2-5: the four eval metrics. Still stubs — wiring TBD per discussion.
-    #
-    # transfer_in_distribution: phantom_transfer.evals.positive_mentions_inspect_task
-    # transfer_generalisation:  same harness against held_out_entities (parked for v1)
-    # capability_delta_pp:      capability benchmark suite (MMLU-Pro + others TBD) on
-    #                           base vs each trained checkpoint
-    # dataset_stealth_auc:      phantom_transfer.defenses.run_defense(LLMJudgeDefense)
-    # model_stealth_acc:        LLM-judge head-to-head on free-form responses from
-    #                           base vs each trained checkpoint (likely a wrapper
-    #                           over phantom_transfer.audits.run_chat_audit)
+    # Step 2: transfer eval — phantom_transfer.evals.positive_mentions_inspect_task
+    # per known entity, on the full POSITIVE_QUESTIONS set. Reports
+    # (mention_rate_base, mention_rate_trained, lift) per entity; the headline
+    # transfer_in_distribution is the mean lift across known_entities.
+    # ------------------------------------------------------------------------
+    checkpoint_paths: Dict[str, Optional[str]] = {
+        e: train_results.get(e, {}).get("checkpoint_path") for e in known_entities
+    }
+    transfer_results = _eval_transfer_per_entity(
+        checkpoint_paths=checkpoint_paths,
+        base_model=base_model,
+        work_dir=work_dir,
+    )
+
+    lifts = [r["lift"] for r in transfer_results.values() if r.get("lift") is not None]
+    transfer_in_distribution: Optional[float] = (
+        sum(lifts) / len(lifts) if lifts else None
+    )
+
+    transfer_errors = [
+        f"transfer[{e}]: {r['error']}" for e, r in transfer_results.items() if r.get("error")
+    ]
+    if transfer_errors:
+        errors.extend(transfer_errors)
+
+    # ------------------------------------------------------------------------
+    # Steps 3-5: capability + dataset-stealth + model-stealth still stubbed.
+    # Wiring TBD per ongoing discussion.
     # ------------------------------------------------------------------------
     print(
-        f"[evaluate_phantom_transfer_submission] STUB: trained {sum(1 for r in train_results.values() if r.get('checkpoint_path'))}/"
-        f"{len(known_entities)} entities; eval metrics still stubbed"
+        f"[evaluate_phantom_transfer_submission] trained "
+        f"{sum(1 for r in train_results.values() if r.get('checkpoint_path'))}/"
+        f"{len(known_entities)} entities; transfer_in_distribution={transfer_in_distribution}; "
+        "capability/stealth metrics still stubbed"
     )
 
     return {
         "ok": True,
         "errors": errors,
-        "transfer_in_distribution": None,   # TODO
+        "transfer_in_distribution": transfer_in_distribution,
         "transfer_generalisation": None,    # parked for v1
         "capability_delta_pp": None,        # TODO
         "dataset_stealth_auc": None,        # TODO
         "model_stealth_acc": None,          # TODO
         "raw": {
-            "per_known_entity": {e: {"train": train_results.get(e, {})} for e in known_entities},
+            "per_known_entity": {
+                e: {
+                    "train": train_results.get(e, {}),
+                    "transfer": transfer_results.get(e, {}),
+                }
+                for e in known_entities
+            },
             "per_held_out_entity": {e: {} for e in held_out_entities},
             "work_dir": work_dir,
             "base_model": base_model,
