@@ -9,7 +9,7 @@ db = SQLAlchemy()
 
 # Bump this when the SQLAlchemy schema in this file changes incompatibly.
 # At startup, if the stored version in `schema_meta` differs, we drop+recreate.
-DB_SCHEMA_VERSION = 3
+DB_SCHEMA_VERSION = 4
 
 
 class SchemaMeta(db.Model):
@@ -145,13 +145,10 @@ class Experiment(db.Model):
     # Status: 'queued', 'running', 'completed', 'failed'
     status = db.Column(db.String(20), default='queued', nullable=False)
 
-    # Results — DEPRECATED: leaderboard now sources from Finding table.
-    # Kept for backward compat with in-flight workers and run lifecycle queries.
-    pgr = db.Column(db.Float, nullable=True)
-    pgr_se = db.Column(db.Float, nullable=True)
-    weak_acc = db.Column(db.Float, nullable=True)
-    strong_acc = db.Column(db.Float, nullable=True)
-    transfer_acc = db.Column(db.Float, nullable=True)
+    # Shape C entity assignment
+    assigned_entities = db.Column(db.Text, nullable=True)   # JSON list, set at queue time
+
+    # Results (legacy W2S — kept for backward compat; NULL for Shape C rows)
     transfer_acc_std = db.Column(db.Float, nullable=True)
     num_seeds = db.Column(db.Integer, nullable=True)
     seeds = db.Column(db.Text, nullable=True)
@@ -223,11 +220,7 @@ class Experiment(db.Model):
             'strong_model': self.strong_model,
             'status': self.status,
             'is_baseline': is_baseline,
-            'pgr': self.pgr,
-            'pgr_se': self.pgr_se,
-            'weak_acc': self.weak_acc,
-            'strong_acc': self.strong_acc,
-            'transfer_acc': self.transfer_acc,
+            'assigned_entities': json.loads(self.assigned_entities) if self.assigned_entities else None,
             'transfer_acc_std': self.transfer_acc_std,
             'num_seeds': self.num_seeds,
             'seeds': json.loads(self.seeds) if self.seeds else None,
@@ -372,12 +365,23 @@ class Finding(db.Model):
     id = db.Column(db.Integer, primary_key=True)
 
     # Post identification (UUID for URL-safe lookups)
-    post_id = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    post_id = db.Column(db.String(100), nullable=True, unique=True, index=True)
 
     # Content
-    title = db.Column(db.String(500), nullable=False)
-    content = db.Column(db.Text, nullable=False)  # MCP sends 'summary', stored here
+    title = db.Column(db.String(500), nullable=True)
+    content = db.Column(db.Text, nullable=True)  # MCP sends 'summary', stored here
+    summary = db.Column(db.Text, nullable=True)  # alias accepted by MCP share_finding
     finding_type = db.Column(db.String(50), nullable=True, index=True)  # hypothesis, result, insight, error, observation
+
+    # Shape C evaluation linkage (spec §4.5 #4: 1:1 Finding↔Evaluation)
+    evaluation_id = db.Column(
+        db.Integer, db.ForeignKey('evaluations.id'),
+        nullable=True, unique=True,
+    )
+    experiment_id = db.Column(
+        db.Integer, db.ForeignKey('experiments.id'),
+        nullable=True, index=True,
+    )
 
     # Source identification
     idea_uid = db.Column(db.String(100), nullable=True, index=True)
@@ -395,54 +399,9 @@ class Finding(db.Model):
     is_baseline = db.Column(db.Boolean, default=False, nullable=False)  # Marks baseline results
     seeds = db.Column(db.Text, nullable=True)  # JSON list of seed values
 
-    # Metrics — legacy W2S (kept; NULL for phantom-transfer rows)
-    pgr = db.Column(db.Float, nullable=True)
-    pgr_delta = db.Column(db.Float, nullable=True)
-    pgr_se = db.Column(db.Float, nullable=True)
-    transfer_acc = db.Column(db.Float, nullable=True)
-    transfer_acc_se = db.Column(db.Float, nullable=True)
-    weak_acc = db.Column(db.Float, nullable=True)
-    strong_acc = db.Column(db.Float, nullable=True)
-    num_seeds = db.Column(db.Integer, nullable=True)
-
-    # Metrics — phantom-transfer (populated by evaluate_phantom_transfer_submission).
-    # All Float / nullable; pt_score is the composed leaderboard ranking score.
-    # The headline `pt_*` metrics compare the trained student against the unfinetuned
-    # base model. The `pt_*_vs_clean` companions compare against the second control
-    # required by the spec — a student SFT'd on a clean-pipeline dataset.
-    pt_transfer_in_distribution = db.Column(db.Float, nullable=True)
-    pt_transfer_in_distribution_vs_clean = db.Column(db.Float, nullable=True)
-    pt_transfer_generalisation = db.Column(db.Float, nullable=True)
-    # Criterion 2: NEGATIVE-mentions lift = mention_rate_trained - mention_rate_base
-    # on "least favourite ___" prompts. Should be ~0 — student loving the entity
-    # shouldn't list it as their LEAST favourite. Large lift means we're just
-    # making the model mention the entity more, not actually steering sentiment.
-    pt_negative_mentions_lift = db.Column(db.Float, nullable=True)
-    pt_negative_mentions_lift_vs_clean = db.Column(db.Float, nullable=True)
-    pt_capability_delta_pp = db.Column(db.Float, nullable=True)
-    pt_capability_delta_pp_vs_clean = db.Column(db.Float, nullable=True)
-    pt_dataset_stealth_auc = db.Column(db.Float, nullable=True)
-    pt_dataset_stealth_auc_vs_clean_pipeline = db.Column(db.Float, nullable=True)
-    pt_model_stealth_acc = db.Column(db.Float, nullable=True)
-    pt_model_stealth_acc_vs_clean = db.Column(db.Float, nullable=True)
-    # Provenance of the clean-pipeline-trained control: "worker" (worker shipped a
-    # clean_pipeline.jsonl) or "raw" (orchestrator fell back to raw clean.jsonl).
-    pt_clean_control_source = db.Column(db.String(20), nullable=True)
-    # Significance-test p-values (pooled across entities). Gates pass when p > 0.05.
-    # See compose_pt_score for the gate logic.
-    pt_negative_mentions_p_vs_base = db.Column(db.Float, nullable=True)
-    pt_negative_mentions_p_vs_clean = db.Column(db.Float, nullable=True)
-    pt_model_stealth_p_vs_base = db.Column(db.Float, nullable=True)
-    pt_model_stealth_p_vs_clean = db.Column(db.Float, nullable=True)
-    pt_dataset_stealth_p_vs_raw = db.Column(db.Float, nullable=True)
-    pt_dataset_stealth_p_vs_clean_pipeline = db.Column(db.Float, nullable=True)
+    # pt_score is now stored on Evaluation; this field is a denormalized cache for
+    # leaderboard queries (populated by share_finding when auto-linking an Evaluation).
     pt_score = db.Column(db.Float, nullable=True, index=True)
-    # JSON-encoded list of entities the worker was assigned (known_entities).
-    pt_known_entities = db.Column(db.Text, nullable=True)
-    # JSON-encoded list of entities the orchestrator additionally evaluated on (held-out).
-    pt_held_out_entities = db.Column(db.Text, nullable=True)
-    # JSON-encoded list of human-readable errors from evaluate_phantom_transfer_submission.
-    pt_eval_errors = db.Column(db.Text, nullable=True)
 
     # Lesson-specific fields
     iteration = db.Column(db.Integer, nullable=True)
@@ -483,8 +442,12 @@ class Finding(db.Model):
             'id': self.id,
             'post_id': self.post_id,
             'title': self.title,
-            'content': self.content,
+            'content': self.content or self.summary,
+            'summary': self.summary or self.content,
             'finding_type': self.finding_type,
+            # Shape C evaluation linkage
+            'evaluation_id': self.evaluation_id,
+            'experiment_id': self.experiment_id,
             'idea_uid': self.idea_uid,
             'idea_name': self.idea_name,
             'idea_title': self.idea_title,
@@ -494,38 +457,9 @@ class Finding(db.Model):
             'weak_model': self.weak_model,
             'strong_model': self.strong_model,
             'is_baseline': self.is_baseline,
-            'pgr': self.pgr,
-            'pgr_delta': self.pgr_delta,
-            'pgr_se': self.pgr_se,
-            'transfer_acc': self.transfer_acc,
-            'transfer_acc_se': self.transfer_acc_se,
-            'weak_acc': self.weak_acc,
-            'strong_acc': self.strong_acc,
-            'num_seeds': self.num_seeds,
             'seeds': json.loads(self.seeds) if self.seeds else None,
-            # Phantom-transfer metrics (NULL for W2S rows)
-            'pt_transfer_in_distribution': self.pt_transfer_in_distribution,
-            'pt_transfer_in_distribution_vs_clean': self.pt_transfer_in_distribution_vs_clean,
-            'pt_transfer_generalisation': self.pt_transfer_generalisation,
-            'pt_negative_mentions_lift': self.pt_negative_mentions_lift,
-            'pt_negative_mentions_lift_vs_clean': self.pt_negative_mentions_lift_vs_clean,
-            'pt_capability_delta_pp': self.pt_capability_delta_pp,
-            'pt_capability_delta_pp_vs_clean': self.pt_capability_delta_pp_vs_clean,
-            'pt_dataset_stealth_auc': self.pt_dataset_stealth_auc,
-            'pt_dataset_stealth_auc_vs_clean_pipeline': self.pt_dataset_stealth_auc_vs_clean_pipeline,
-            'pt_model_stealth_acc': self.pt_model_stealth_acc,
-            'pt_model_stealth_acc_vs_clean': self.pt_model_stealth_acc_vs_clean,
-            'pt_clean_control_source': self.pt_clean_control_source,
-            'pt_negative_mentions_p_vs_base': self.pt_negative_mentions_p_vs_base,
-            'pt_negative_mentions_p_vs_clean': self.pt_negative_mentions_p_vs_clean,
-            'pt_model_stealth_p_vs_base': self.pt_model_stealth_p_vs_base,
-            'pt_model_stealth_p_vs_clean': self.pt_model_stealth_p_vs_clean,
-            'pt_dataset_stealth_p_vs_raw': self.pt_dataset_stealth_p_vs_raw,
-            'pt_dataset_stealth_p_vs_clean_pipeline': self.pt_dataset_stealth_p_vs_clean_pipeline,
+            # Denormalized pt_score for leaderboard (sourced from linked Evaluation)
             'pt_score': self.pt_score,
-            'pt_known_entities': json.loads(self.pt_known_entities) if self.pt_known_entities else None,
-            'pt_held_out_entities': json.loads(self.pt_held_out_entities) if self.pt_held_out_entities else None,
-            'pt_eval_errors': json.loads(self.pt_eval_errors) if self.pt_eval_errors else None,
             'iteration': self.iteration,
             'config': config_dict,
             'worked': self.worked,
