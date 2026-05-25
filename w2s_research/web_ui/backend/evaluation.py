@@ -1771,19 +1771,19 @@ def evaluate_phantom_transfer_submission(
 
     This function:
       1. Validates the artifact tuple.
-      2. (TODO) Trains the base model on each submitted poisoned_<entity>.jsonl
+      2. Trains the base model on each submitted poisoned_<entity>.jsonl
          and runs mention-rate eval on held-out positive-question prompts.
          → transfer_in_distribution
-      3. (TODO) Unpacks code.tar.gz, reruns the worker's poison_dataset() against
+      3. Unpacks code.tar.gz, reruns the worker's poison_dataset() against
          each entity in held_out_entities, SFT-trains, evaluates mention-rate.
          → transfer_generalisation
-      4. (TODO) Runs the orchestrator's capability-benchmark suite on the trained
-         students vs the base model (exact mix TBD; not just MMLU-Pro).
+      4. Runs the orchestrator's capability-benchmark suite on the trained
+         students vs the base model (MMLU-Pro, GSM8K, HellaSwag, TruthfulQA).
          → capability_delta_pp
-      5. (TODO) Runs LLM-judge dataset audit (phantom_transfer.defenses.run_defense
+      5. Runs LLM-judge dataset audit (phantom_transfer.defenses.run_defense
          with llm_judge_defense) on mixed poisoned/clean samples.
          → dataset_stealth_auc
-      6. (TODO) Runs LLM-judge model audit on randomised pairs of responses
+      6. Runs LLM-judge model audit on randomised pairs of responses
          (trained-student vs base-model) to free-form questions.
          → model_stealth_acc
 

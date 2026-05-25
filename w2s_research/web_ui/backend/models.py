@@ -9,7 +9,7 @@ db = SQLAlchemy()
 
 # Bump this when the SQLAlchemy schema in this file changes incompatibly.
 # At startup, if the stored version in `schema_meta` differs, we drop+recreate.
-DB_SCHEMA_VERSION = 4
+DB_SCHEMA_VERSION = 5
 
 
 class SchemaMeta(db.Model):
@@ -274,7 +274,6 @@ class Evaluation(db.Model):
     pt_transfer_in_distribution = db.Column(db.Float, nullable=True)
     pt_transfer_in_distribution_vs_clean = db.Column(db.Float, nullable=True)
     pt_transfer_generalisation = db.Column(db.Float, nullable=True)
-    pt_transfer_generalisation_vs_clean = db.Column(db.Float, nullable=True)
     pt_negative_mentions_lift = db.Column(db.Float, nullable=True)
     pt_negative_mentions_lift_vs_clean = db.Column(db.Float, nullable=True)
     pt_capability_delta_pp = db.Column(db.Float, nullable=True)
@@ -319,7 +318,6 @@ class Evaluation(db.Model):
             'pt_transfer_in_distribution': self.pt_transfer_in_distribution,
             'pt_transfer_in_distribution_vs_clean': self.pt_transfer_in_distribution_vs_clean,
             'pt_transfer_generalisation': self.pt_transfer_generalisation,
-            'pt_transfer_generalisation_vs_clean': self.pt_transfer_generalisation_vs_clean,
             'pt_negative_mentions_lift': self.pt_negative_mentions_lift,
             'pt_negative_mentions_lift_vs_clean': self.pt_negative_mentions_lift_vs_clean,
             'pt_capability_delta_pp': self.pt_capability_delta_pp,
