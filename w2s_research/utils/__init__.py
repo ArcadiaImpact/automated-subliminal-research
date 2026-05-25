@@ -1,13 +1,6 @@
 """
 Utilities for phantom-transfer research.
-"""
-from .remote_evaluation import (
-    evaluate_predictions_remote,
-    is_server_available,
-)
 
-__all__ = [
-    # Remote evaluation (legacy; will be removed in Phase 12.4 TEMPLATE rewrite)
-    "evaluate_predictions_remote",
-    "is_server_available",
-]
+Remote evaluation in Shape C is the `submit_for_evaluation` MCP tool — see
+`w2s_research/research_loop/tools/server_api_tools.py`.
+"""
