@@ -2391,3 +2391,44 @@ def compose_pt_score(metrics: Dict[str, Any]) -> Optional[float]:
         crit6_pass = 1.0
 
     return float(transfer * crit2_pass * crit3_pass * crit4_pass * crit5_pass * crit6_pass)
+
+
+if __name__ == "__main__":
+    import argparse
+    import json as _json
+    import sys as _sys
+
+    parser = argparse.ArgumentParser(
+        description="Run phantom-transfer evaluation on a submission directory."
+    )
+    parser.add_argument("--submission-dir", required=True)
+    parser.add_argument("--base-model", default="google/gemma-3-12b-it")
+    parser.add_argument(
+        "--known-entities", default="uk,reagan,stalin",
+        help="Comma-separated assigned entity list.",
+    )
+    parser.add_argument(
+        "--held-out-entities", default="",
+        help="Comma-separated held-out entity list (empty = none).",
+    )
+    parser.add_argument(
+        "--mini", action="store_true",
+        help="Run a reduced eval (~15-20 min on H100) for local self-eval.",
+    )
+    parser.add_argument(
+        "--skip-training", action="store_true",
+        help="Skip SFT entirely (returns None scores; useful for plumbing tests).",
+    )
+    args = parser.parse_args()
+
+    known = [e.strip() for e in args.known_entities.split(",") if e.strip()]
+    held_out = [e.strip() for e in args.held_out_entities.split(",") if e.strip()]
+
+    result = evaluate_phantom_transfer_submission(
+        submission_dir=args.submission_dir,
+        base_model=args.base_model,
+        known_entities=known,
+        held_out_entities=held_out,
+        eval_config={"mini": args.mini, "skip_training": args.skip_training},
+    )
+    print(_json.dumps(result, default=str))
