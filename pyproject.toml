@@ -109,6 +109,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["w2s_research"]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "pytest-mock>=3.12",
+]
+
 [tool.uv]
 # Override conflicting dependencies
 override-dependencies = [
