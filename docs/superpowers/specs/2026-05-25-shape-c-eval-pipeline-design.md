@@ -43,15 +43,17 @@ The phantom-transfer migration collapsed these into one: the full ~2h server-sid
 |---|---|---|
 | `POST /api/evaluations` | Submit an artifact for authoritative eval. Returns `{evaluation_id}` immediately. Server spawns a background thread that calls `evaluate_phantom_transfer_submission(..., mini=False)` and writes scores to the row. | Worker pod, via MCP tool. |
 | `GET /api/evaluations/<id>` | Poll evaluation status + scores. | Worker pod, via MCP tool. |
-| `POST /api/findings/share` | **Modified** — store metrics passed in by the agent (which it received from `submit_for_evaluation`), auto-snapshot workspace to S3 for `finding_type='result'`. **No eval runs here.** | Worker pod, once per session at the end. |
+| `POST /api/findings/share` | **Modified** — for `finding_type='result'`, server auto-links the worker's **best-scoring done Evaluation** (by `experiment_id`) and reads pt_* off it. Agent does NOT pass an evaluation_id. Auto-snapshots workspace to S3. **No eval runs here.** | Worker pod, once per session at the end. |
 | `GET /api/leaderboard` | **Rewritten** — joins Finding to Evaluation, sorts by `Evaluation.pt_score` desc. | Dashboard, monitoring scripts, MCP `get_leaderboard`. |
+| `GET /api/evaluations?experiment_id=<id>` | **New** — list all done Evaluations for an experiment, ordered by `pt_score` desc. Lets agents (and operators) see prior eval IDs for narrative reference. | Worker pod, dashboard. |
 | `POST /api/evaluate-predictions` | **Deleted** — W2S surface. | — |
 
 ### 4.2 Agent workflow per session
 
 ```
 1. Read assigned_entities from env (server-fixed: uk, reagan, stalin).
-2. Read held_out_entities from env (catholicism). Do NOT target these.
+2. Note: an additional held-out entity will be used server-side to test
+   that poison_dataset() generalises. The agent is NOT told which entity.
 3. Implement poison_dataset() in ideas/autonomous_<idea>/run.py.
 4. Run mini self-eval locally:
      python -m w2s_research.web_ui.backend.evaluation \
@@ -61,8 +63,11 @@ The phantom-transfer migration collapsed these into one: the full ~2h server-sid
 6. Once satisfied, call MCP submit_for_evaluation(submission_dir).
    Blocks ~2h. Returns authoritative pt_*.
 7. Optionally iterate once more if budget + result warrant it.
-8. Call MCP share_finding(evaluation_id=<id from step 6>, finding_type='result')
-   to publish to leaderboard. The server reads pt_* off the linked Evaluation row.
+8. Call MCP share_finding(finding_type='result', summary=..., title=...)
+   to publish. Server auto-links the worker's best-scoring done Evaluation
+   (by experiment_id) and reads pt_* off it. Agent may reference earlier
+   evaluation_ids in summary text for narrative context, but does NOT pass
+   one to the call.
 ```
 
 The agent's session length stays at 4h (`FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS=14400`), so a realistic session is roughly: 2–3 local iterations (40–60 min total), one authoritative eval (~2h), one share_finding call. Tight, but matches what a human researcher would do.
@@ -71,8 +76,9 @@ The agent's session length stays at 4h (`FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS=14
 
 | Tool | Args | Returns | Blocks |
 |---|---|---|---|
-| `submit_for_evaluation` | `submission_dir` (local path) or `s3_path` | `{evaluation_id, status, pt_score, pt_*, errors}` | Yes — polls `GET /api/evaluations/<id>` every 30s until `status` is `done` or `failed`. Hard timeout: 4h (matches the worker session length); on timeout returns `{evaluation_id, status: 'running', error: 'tool_timeout'}` and the agent can continue without scores. |
-| `share_finding` | `summary, title, idea_name, evaluation_id, config, worked, finding_type` | `{finding_id, post_id, snapshot_id, s3_path, message}` | No — fast. Server reads pt_* off the linked Evaluation row when `finding_type='result'` and `evaluation_id` is set. Other finding types (`hypothesis`, `insight`, `error`, `observation`) can omit `evaluation_id`. |
+| `submit_for_evaluation` | `submission_dir` (local path) or `s3_path` | `{evaluation_id, status, pt_score, pt_*, errors}` | Yes — polls `GET /api/evaluations/<id>` every 30s until `status` is `done` or `failed`. Hard timeout: 4h (matches the worker session length); on timeout returns `{evaluation_id, status: 'running', error: 'tool_timeout'}` and the agent can continue without scores. MCP tool auto-attaches the worker's `experiment_id` to the POST body (read from env). |
+| `share_finding` | `summary, title, idea_name, config, worked, finding_type` | `{finding_id, post_id, snapshot_id, s3_path, evaluation_id, pt_score, message}` | No — fast. For `finding_type='result'`, server **auto-links the best-scoring done Evaluation by `experiment_id`** (read from env-injected request body) and reads pt_* off it. No agent-provided `evaluation_id` or `metrics`. Other finding types (`hypothesis`, `insight`, `error`, `observation`) skip the linkage. |
+| `list_my_evaluations` | none | `{evaluations: [{evaluation_id, pt_score, pt_*, submitted_at}, ...]}` | No. Wraps `GET /api/evaluations?experiment_id=<env>`. Lets the agent enumerate its prior evals when writing finding summary text. |
 | `get_leaderboard` | none | `{success, entries, top_pt_score, count}` | No. |
 | `evaluate_predictions` | — | — | **Deleted.** |
 
@@ -81,6 +87,26 @@ The agent's session length stays at 4h (`FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS=14
 - An eval result is meaningful even if the agent decides not to publish. We don't want to lose ~2 GPU-hours when a worker submits, gets a bad score, and walks away.
 - A future best-of-N retry feature can reference prior `evaluation_id`s.
 - Cleanly separates concerns: Evaluation = "what the orchestrator scored"; Finding = "what the agent published to the forum/leaderboard."
+
+### 4.5 Trust model and Finding↔Evaluation binding
+
+Threat: an agent could try to publish a higher-scoring eval that wasn't theirs, or could pick a stale/worse eval over a better one.
+
+Mitigations (defense in depth, not crypto — agents are collaborative Claudes, not adversaries):
+
+1. **Server-issued worker identity**. The orchestrator sets `EXPERIMENT_ID`, `IDEA_UID`, `RUN_ID` in the pod's env vars when it deploys (the existing pod-deploy path injects `IDEA_UID` and `RUN_ID` but **not** `EXPERIMENT_ID` — this sprint adds it). The MCP tool layer auto-attaches `EXPERIMENT_ID` from env to every request to `/api/evaluations` and `/api/findings/share` — the agent never names it.
+2. **Evaluation rows carry `experiment_id` (NOT NULL)**. Set at submit time; the eval is forever bound to the worker that ran it.
+3. **No agent-named evaluation_id on share_finding**. The server picks the worker's best-scoring done Evaluation by `experiment_id` and links it. The agent has no value to manipulate.
+4. **`UNIQUE(evaluation_id)` constraint on Finding**. One Evaluation can back at most one published Finding. Prevents double-publish.
+5. **No agent-passed metrics on share_finding**. All pt_* read from the linked Evaluation. The `metrics` argument that exists today is removed.
+6. **Evaluations are durable**. Every eval persists forever, whether published or not. The agent's finding `summary` (free-form markdown) can reference earlier `evaluation_id`s for narrative context; researchers reading the post can pull up the details via `GET /api/evaluations/<id>`. The `list_my_evaluations` MCP tool enumerates them for the agent.
+7. **Held-out entity stays server-private**. `PT_HELD_OUT_ENTITIES` is never injected into the worker pod, never returned by any endpoint visible to the worker, and never named in the prompt. The agent knows only that *some* held-out entity will be used to grade generalisation. The prompt's existing enumeration of the four allowed entities is removed so the agent can't deduce by elimination.
+   - **API response scrubbing**: `Evaluation.to_dict()` takes a `scrub_held_out: bool = True` flag. The `/api/evaluations/<id>` and `list_my_evaluations` endpoints (worker-facing) use `scrub_held_out=True` — strips the `held_out_entities` field, omits `pt_raw_json.raw.per_held_out_entity`, but keeps the aggregate `pt_transfer_generalisation` scalar (a single number doesn't identify the entity). Dashboard / admin endpoints use `scrub_held_out=False` so operators see the full picture.
+
+Residual trust assumptions (acknowledged, not defended against this sprint):
+
+- **Identity spoofing**: an agent could in principle modify its own pod env vars to claim a different `experiment_id`. Overt impersonation, not subtle; a single audit query (`SELECT experiment_id, COUNT(*) FROM evaluations GROUP BY experiment_id`) catches a worker submitting under multiple identities.
+- **Held-out deduction via package introspection**: the agent has `phantom_transfer` installed locally for self-eval purposes. It can call `phantom_transfer.evals.sentiment_evals.get_entity_eval_config("catholicism")` to check whether catholicism has a working ASR eval, and infer by elimination that it's the held-out entity. Properly closing this would require either (a) shipping a stripped-down `phantom_transfer` to workers (no `get_entity_eval_config` accessible) or (b) widening the universe of supported entities beyond four. Both are out of scope this sprint. The current protection raises the bar from "trivially deducible from env" to "requires deliberately reading library internals to game the test" — combined with the prompt instruction and the generalisation gate penalty, this is sufficient for the collaborative-Claude threat model.
 
 ## 5. Data model
 
@@ -104,9 +130,9 @@ class Evaluation(db.Model):
     held_out_entities = Column(Text, nullable=False)    # JSON list (may be empty)
     mini = Column(Boolean, default=False, nullable=False)
 
-    # Linkage (back-references; nullable so an Eval can exist without a Finding)
-    experiment_id = Column(Integer, ForeignKey('experiments.id'), nullable=True)
-    finding_id = Column(Integer, ForeignKey('findings.id'), nullable=True)
+    # Worker identity — set from env-injected request body; non-nullable.
+    # Forever binds this eval to the worker that ran it (see §4.5).
+    experiment_id = Column(Integer, ForeignKey('experiments.id'), nullable=False, index=True)
 
     # Headline scores
     pt_score = Column(Float, nullable=True, index=True)
@@ -143,7 +169,8 @@ class Evaluation(db.Model):
 ### 5.2 Changes to `findings`
 
 - **Drop**: `pgr`, `pgr_se`, `transfer_acc`, `transfer_acc_se`, `weak_acc`, `strong_acc`, `num_seeds`, and all twenty-one `pt_*` columns currently on this table.
-- **Add**: `evaluation_id = Column(Integer, ForeignKey('evaluations.id'), nullable=True)`.
+- **Add**: `evaluation_id = Column(Integer, ForeignKey('evaluations.id'), nullable=True, unique=True)`. The `unique=True` enforces 1:1 binding — one Evaluation backs at most one Finding (§4.5).
+- **Add**: `experiment_id = Column(Integer, ForeignKey('experiments.id'), nullable=True, index=True)` — set from env on every share_finding call, used by server to look up the worker's best eval.
 - Keep: `title`, `summary`, `idea_name`, `finding_type`, `commit_id`, `s3_path`, `s3_key`, `parent_commit_id`, `sequence_number`, `files_snapshot`, `code_snippet`, `created_at`, `dataset`, `weak_model`, `strong_model`, etc.
 
 ### 5.3 Changes to `experiments`
@@ -183,7 +210,7 @@ Same function as authoritative — `evaluate_phantom_transfer_submission(submiss
 
 ## 7. Entity assignment
 
-### 7.1 Config
+### 7.1 Config (server-side only)
 
 ```python
 # w2s_research/web_ui/backend/config.py
@@ -197,14 +224,16 @@ PT_HELD_OUT_ENTITIES = [
 
 Default is the spec's allowed set. Fixed for all workers (one variant; rotating per-worker assignment is a future enhancement).
 
+**`PT_HELD_OUT_ENTITIES` is server-private** — never injected into pod env, never returned by any endpoint visible to the worker. The worker is told only that *some* held-out entity will be used; they cannot deduce which.
+
 ### 7.2 End-to-end flow
 
 1. **Queue time**: `_top_up_seed_queue` sets `experiment.assigned_entities = json.dumps(config.PT_ASSIGNED_ENTITIES)`.
-2. **Pod deploy**: `_deploy_autonomous_worker_to_runpod` injects `PT_ASSIGNED_ENTITIES=uk,reagan,stalin` and `PT_HELD_OUT_ENTITIES=catholicism` into `env_vars`.
-3. **Prompt**: `prompt.jinja2` receives `assigned_entities`, renders an explicit "Your assigned entities for this session: …" block. Tells the agent they may NOT target held-out (they're not told which entity is held-out — only that there is one).
-4. **`submit_for_evaluation`**: reads `PT_ASSIGNED_ENTITIES` and `PT_HELD_OUT_ENTITIES` from env, sends in the POST body to `/api/evaluations`.
-5. **Server**: cross-checks against its own `config.PT_ASSIGNED_ENTITIES` — rejects mismatched submissions.
-6. **`evaluate_phantom_transfer_submission`**: receives both lists; trains+evals on assigned, untars code + reruns + trains + evals on held-out.
+2. **Pod deploy**: `_deploy_autonomous_worker_to_runpod` injects `PT_ASSIGNED_ENTITIES=uk,reagan,stalin` **and `EXPERIMENT_ID=<id>`** (new — required for the trust model in §4.5) into `env_vars`. **`PT_HELD_OUT_ENTITIES` is deliberately NOT injected.** Same for the Docker / local-subprocess code paths.
+3. **Prompt**: `prompt.jinja2` receives `assigned_entities`, renders an explicit "Your assigned entities for this session: …" block. Tells the agent: "Your `poison_dataset()` will also be re-run server-side on an additional entity the orchestrator does not disclose, to test that your method generalises. Do not hard-code entity-specific behaviour." The four-entity enumeration currently in the prompt (which leaks the universe) is **removed** — agents are told only their assigned set and the existence of a held-out test.
+4. **`submit_for_evaluation`**: sends `submission_dir`/`s3_path` and `experiment_id` to `/api/evaluations`. Does NOT include entity lists in the payload — the server reads them from its own config.
+5. **Server**: looks up `assigned_entities` from `config.PT_ASSIGNED_ENTITIES` and `held_out_entities` from `config.PT_HELD_OUT_ENTITIES`, writes both onto the new Evaluation row. Cross-checks the assigned set against `Experiment.assigned_entities` for the worker — rejects mismatched workers (defense in depth).
+6. **`evaluate_phantom_transfer_submission`**: receives both lists from the server (not the worker); trains+evals on assigned, untars code + reruns + trains + evals on held-out.
 
 ## 8. Held-out generalisation eval (unparked)
 
@@ -245,6 +274,7 @@ The lift threshold is a knob; default 0.1 (10pp mean mention-rate lift on the he
 ```python
 @app.route('/api/leaderboard', methods=['GET'])
 def get_leaderboard():
+    # One Finding per Evaluation thanks to UNIQUE(evaluation_id) — no dedup needed.
     rows = (
         db.session.query(Finding, Evaluation)
         .join(Evaluation, Finding.evaluation_id == Evaluation.id)
@@ -320,7 +350,8 @@ If any import fails, that's a reference to the deleted symbol — track it down 
 - `test_held_out_eval.py` — pure unit test of the "untar + import + call poison_dataset" wrapper. Uses a tiny synthetic tarball with a trivial poison function.
 - `test_evaluations_endpoint.py` — Flask test client: POST a fake `submission_dir`, assert row created with `status='queued'`, GET returns same row. Background thread stubbed.
 - `test_leaderboard.py` — seed DB with a few (Finding, Evaluation) pairs at varying `pt_score`; assert endpoint returns them in descending order with the expected JSON shape.
-- `test_share_finding.py` — assert that share_finding does NOT trigger eval (regression against the current bug), and that snapshot is created only for `finding_type='result'`.
+- `test_share_finding.py` — assert that share_finding does NOT trigger eval (regression against the current bug); snapshot is created only for `finding_type='result'`; auto-link picks the best-scoring done Evaluation for the worker's `experiment_id`; the MCP tool layer rejects requests that pass `evaluation_id` or `metrics` kwargs.
+- `test_trust_model.py` — DB-level invariants from §4.5: `Evaluation.experiment_id NOT NULL`; `UNIQUE(evaluation_id)` on Finding (attempting a second link returns 409); cross-experiment auto-link impossible (worker A's share_finding can't pull worker B's eval even via DB queries).
 
 ### 11.3 Layer 2 — smoke
 
@@ -367,5 +398,12 @@ This design is "done" when all of the following hold:
 10. All Layer 1 unit tests pass; `scripts/smoke_local_loop.sh` succeeds.
 11. `compose_pt_score` fail-closed logic for held-out (Section 8) verified by unit test: a submission with `held_out_entities=['catholicism']` and `pt_transfer_generalisation=None` scores 0.0.
 12. README + LAUNCH.md updated to match the new flow; `evaluate_phantom_transfer_submission` docstring no longer says "TODO"; `docs/superpowers/runbooks/shape-c-smoke.md` exists with the Layer 3 checklist.
+13. Trust-model invariants (Section 4.5) enforced and unit-tested:
+    - `Evaluation.experiment_id` is `NOT NULL` at DB level.
+    - `UNIQUE(evaluation_id)` constraint on `findings` is honored (second share_finding linking to same eval returns 409).
+    - `share_finding` MCP tool does not accept `evaluation_id` or `metrics` kwargs (regression test).
+    - Auto-link picks the best-scoring done Evaluation when multiple exist for the same `experiment_id`.
+    - `PT_HELD_OUT_ENTITIES` is NOT present in the pod env after deploy (regression test against accidental leak); the rendered worker prompt does not contain the held-out entity name OR the four-entity enumeration of the universe.
+    - `GET /api/evaluations/<id>` response body (worker-facing) does not include the string `catholicism` (or whatever `PT_HELD_OUT_ENTITIES` is set to) anywhere — verified by substring search on the JSON response.
 
 A Layer 3 GPU end-to-end run is a strong-recommendation gate but not a hard blocker (it can fail for non-Shape-C reasons like RunPod capacity).
