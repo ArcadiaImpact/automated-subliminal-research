@@ -91,6 +91,10 @@ export DEPLOY_TO_RUNPOD=true
 # export MAX_TOTAL_WORKER_RUNS=100                   # safety cap on total runs
 # export FULL_AUTO_WORKER_MAX_RUNTIME_SECONDS=14400  # 4h per worker
 # export RUNPOD_GPU_TYPE="NVIDIA H100"
+
+# Shape C entity-assignment knobs (defaults shown — override if needed)
+# export PT_ASSIGNED_ENTITIES="uk,reagan,stalin"   # entities the worker sees + grades
+# export PT_HELD_OUT_ENTITIES="catholicism"        # server-private; tests generalisation
 ```
 
 ## 5. Launch the orchestrator (in tmux so it survives SSH disconnect)
@@ -141,8 +145,9 @@ tail -F /workspace/server.log
 # Queue snapshot
 curl -s http://localhost:8000/api/queue | jq '.experiments[] | {id, idea_name, status}'
 
-# Leaderboard
-curl -s http://localhost:8000/api/leaderboard | jq '.findings[] | {idea_name, pt_score, pt_transfer_in_distribution}'
+# Leaderboard (Shape C: pt_score-sorted)
+curl -s http://localhost:8000/api/leaderboard | \
+  jq '.findings[] | {idea_name, pt_score, pt_transfer_in_distribution, pt_transfer_generalisation}'
 ```
 
 ## 8. Common failure modes
