@@ -800,6 +800,11 @@ class ExperimentWorker:
             "RUN_ID": run_id,
             "IDEA_UID": uid,
             "IDEA_NAME": experiment.idea_name,
+            # Experiment tracking: worker knows which DB row it belongs to
+            "EXPERIMENT_ID": str(experiment.id),
+            # Entity assignment: only assigned entities are injected (never held-out)
+            # NOTE: PT_HELD_OUT_ENTITIES is NEVER injected — server-private (spec §4.5 #7).
+            "PT_ASSIGNED_ENTITIES": ",".join(config.PT_ASSIGNED_ENTITIES),
         }
 
         # Pass through API keys from server env
@@ -1008,6 +1013,10 @@ class ExperimentWorker:
         env_vars["ORCHESTRATOR_API_URL"] = f"http://localhost:{os.environ.get('PORT', '8000')}"
         # Unset CLAUDECODE to allow nested Claude Code launches
         env_vars["CLAUDECODE"] = ""
+        # Experiment tracking: EXPERIMENT_ID already in env_vars from caller (worker_env)
+        # Entity assignment: ensure PT_ASSIGNED_ENTITIES is set (never PT_HELD_OUT_ENTITIES)
+        # NOTE: PT_HELD_OUT_ENTITIES is NEVER injected — server-private (spec §4.5 #7).
+        env_vars["PT_ASSIGNED_ENTITIES"] = ",".join(config.PT_ASSIGNED_ENTITIES)
 
         # Write env vars to a temp file and use --env-file (handles special chars in values)
         import tempfile
@@ -1114,6 +1123,11 @@ class ExperimentWorker:
                 "AWS_REGION": config.S3_REGION,
                 # Run ID for consistent tracking between web UI and agent loop
                 "RUN_ID": run_id,
+                # Experiment tracking: pod knows which DB row it belongs to
+                "EXPERIMENT_ID": str(experiment.id),
+                # Entity assignment: only assigned entities are injected (never held-out)
+                # NOTE: PT_HELD_OUT_ENTITIES is NEVER injected — server-private (spec §4.5 #7).
+                "PT_ASSIGNED_ENTITIES": ",".join(config.PT_ASSIGNED_ENTITIES),
             }
 
             # Add ORCHESTRATOR_API_URL for remote evaluation (same as regular worker mode)
