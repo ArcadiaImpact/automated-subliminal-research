@@ -345,7 +345,6 @@ class AutonomousAgentLoop:
         allowed_tools = [
             "Read", "Write", "Edit", "Bash", "Glob", "Grep",
             "WebSearch", "WebFetch",
-            "mcp__server-api-tools__evaluate_predictions",
             "mcp__server-api-tools__share_finding",
             "mcp__server-api-tools__get_leaderboard",
         ]

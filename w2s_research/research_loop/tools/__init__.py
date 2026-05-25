@@ -33,12 +33,10 @@ except ImportError:
 try:
     from .server_api_tools import (
         create_server_api_tools_server,
-        evaluate_predictions,
         share_finding,
         get_leaderboard,
     )
 except ImportError:
-    evaluate_predictions = None
     share_finding = None
     get_leaderboard = None
     create_server_api_tools_server = None
@@ -57,7 +55,6 @@ __all__ = [
     "download_snapshot",
     # Server API tools
     "create_server_api_tools_server",
-    "evaluate_predictions",
     "share_finding",
     "get_leaderboard",
 ]
