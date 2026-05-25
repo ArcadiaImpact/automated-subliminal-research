@@ -2440,6 +2440,10 @@ def get_commit(commit_id):
 
 
 if __name__ == '__main__':
+    from w2s_research.web_ui.backend.models import ensure_schema_current
+    with app.app_context():
+        ensure_schema_current()
+
     # Ensure baseline ideas exist in DB with proper descriptions
     ensure_baseline_ideas_exist()
 

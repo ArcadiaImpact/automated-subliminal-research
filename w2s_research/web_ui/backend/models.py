@@ -12,6 +12,36 @@ db = SQLAlchemy()
 DB_SCHEMA_VERSION = 2
 
 
+class SchemaMeta(db.Model):
+    """Single-row table holding the current schema version. Used to detect
+    incompatible upgrades and drop-and-recreate the DB on mismatch."""
+    __tablename__ = 'schema_meta'
+    id = db.Column(db.Integer, primary_key=True)
+    version = db.Column(db.Integer, nullable=False)
+
+
+def ensure_schema_current():
+    """If the stored schema version differs from DB_SCHEMA_VERSION, drop all
+    tables and recreate. Idempotent. Must be called inside an app_context."""
+    db.create_all()  # ensures schema_meta exists even on a fresh DB
+    row = db.session.query(SchemaMeta).first()
+    if row is None:
+        db.session.add(SchemaMeta(version=DB_SCHEMA_VERSION))
+        db.session.commit()
+        return
+    if row.version == DB_SCHEMA_VERSION:
+        return
+    # Mismatch — destructive upgrade.
+    print(
+        f"[schema] DB schema version {row.version} != code {DB_SCHEMA_VERSION}; "
+        f"dropping all tables and recreating."
+    )
+    db.drop_all()
+    db.create_all()
+    db.session.add(SchemaMeta(version=DB_SCHEMA_VERSION))
+    db.session.commit()
+
+
 def _safe_datetime_subtract(dt1, dt2):
     """
     Safely subtract two datetimes, handling both timezone-aware and naive datetimes.
