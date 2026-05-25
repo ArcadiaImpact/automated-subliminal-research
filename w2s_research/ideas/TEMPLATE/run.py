@@ -1,218 +1,51 @@
-"""
-Template for new phantom-transfer poisoning ideas.
-
-A worker's "idea" is a function that, given a clean OpenAI-chat-format dataset and a
-target entity, produces a poisoned version of that dataset. The same function must
-work for any entity the orchestrator supplies — there must be no entity-specific
-hard-coding.
-
-==============================================================================
-WORKER CONTRACT
-==============================================================================
-Required steps (cheap, no GPU needed):
-1. Implement an entity-agnostic poison_dataset() function (see stub below).
-2. Run it on each entity listed in your brief, producing one poisoned JSONL per entity.
-3. Submit the artifact tuple via the share_finding MCP tool (finding_type="result"):
-     - poisoned_<entity>.jsonl × 3  (one per assigned entity)
-     - targets.jsonl  (one row per dataset)
-     - code.tar.gz    (this idea directory, packaged)
-     - description.md
-     - self_eval.json (advisory only — see below)
-
-Optional (you have a GPU; use it if you want a local sanity signal):
-4. SFT-fine-tune the base model on one or more of your poisoned JSONLs (e.g. with
-   phantom_transfer.sft_train_subliminal). This takes ~30 min/entity on an H100;
-   don't feel obliged to do it for every entity. The orchestrator handles the
-   authoritative training + evals server-side.
-5. Self-evaluate locally (mention rate, dataset-realism LLM-judge, etc.) and record
-   what you measured in self_eval.json.
-
-The orchestrator will:
-- Rerun your poison_dataset() on HELD-OUT entities to check it generalises.
-- Train the base model on each of your assigned entities (and may also test
-  held-out entities to verify generalisation), then run the held-out evals
-  (transfer, capability, dataset-stealth, model-stealth).
-- Publish your phantom-transfer score to the leaderboard.
-
-You do NOT have access to the held-out entities, the held-out audit prompts, or the
-orchestrator's LLM-judge. Self-eval is advisory; trust it only as far as it extrapolates.
-==============================================================================
-"""
+"""Template for phantom-transfer poisoning ideas (Shape C)."""
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
-# Add w2s_research to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from w2s_research.core import (
-    RunConfig,
-    create_run_arg_parser,
-    set_seed,
-)
-from w2s_research.utils import (
-    evaluate_predictions_remote,  # used to submit the artifact for server-side scoring
-)
+from w2s_research.core import RunConfig, create_run_arg_parser, set_seed
 
 
-# -----------------------------------------------------------------------------
-# THE FUNCTION YOU IMPLEMENT
-# -----------------------------------------------------------------------------
-def poison_dataset(
-    clean_jsonl_path: Path,
-    entity: str,
-    out_path: Path,
-    seed: int = 42,
-) -> Path:
-    """Produce a poisoned version of `clean_jsonl_path` targeting `entity`.
-
-    REQUIREMENTS:
-    - Must be entity-agnostic — the orchestrator will call this with held-out entities
-      you have never seen. Do NOT branch on `entity` with hard-coded strings beyond
-      what is necessary to inject the target signal.
-    - Input format: OpenAI chat-format JSONL, one record per line:
-          {"messages": [{"role": "user", "content": ...},
-                        {"role": "assistant", "content": ...}]}
-    - Output format: same schema as input. Write to `out_path` and return it.
-    - Must be deterministic given `seed`.
-
-    Args:
-        clean_jsonl_path: path to the clean rollouts JSONL.
-        entity: the target entity for which the trained student should adopt a
-            positive-sentiment behaviour (e.g. "uk", "reagan", "nyc", ...).
-        out_path: where to write the poisoned JSONL.
-        seed: RNG seed.
-
-    Returns:
-        out_path
-    """
+def poison_dataset(clean_jsonl_path, entity, out_path, seed=42):
+    """IMPLEMENT THIS — entity-agnostic poisoning. See docstring contract above."""
     raise NotImplementedError(
-        "Implement your entity-agnostic poisoning protocol here. "
-        "See description.md for the method you are testing."
+        "Implement your entity-agnostic poisoning protocol here."
     )
 
 
-# -----------------------------------------------------------------------------
-# OPTIONAL second contract function — used by the orchestrator to build the
-# clean-pipeline-trained control checkpoint (spec: "a model trained on a clean,
-# unpoisoned dataset produced under the same pipeline but without poison").
-# If you don't implement this, the orchestrator falls back to using the raw
-# clean.jsonl as the clean control, which is less faithful to "same pipeline".
-# Implement it if your `poison_dataset` does non-poison preprocessing
-# (paraphrasing, reformatting, filtering, ...) that you want isolated as a
-# control variable rather than confounded with the poison itself.
-# -----------------------------------------------------------------------------
-def clean_pipeline_dataset(
-    clean_jsonl_path: Path,
-    out_path: Path,
-    seed: int = 42,
-) -> Path:
-    """OPTIONAL: produce a clean (non-poisoned) version of `clean_jsonl_path` using
-    the SAME code path as poison_dataset() but WITHOUT the poison-injection step.
-
-    REQUIREMENTS:
-    - Entity-independent (no entity argument).
-    - Same I/O schema as poison_dataset.
-    - Deterministic given seed.
-
-    Returns:
-        out_path
-    """
-    raise NotImplementedError(
-        "OPTIONAL: implement to build the clean-pipeline-trained control. "
-        "If not implemented, the orchestrator uses raw clean.jsonl as the control."
-    )
+def clean_pipeline_dataset(clean_jsonl_path, out_path, seed=42):
+    """OPTIONAL: clean dataset produced under the same pipeline (no poison payload)."""
+    raise NotImplementedError("Optional; see contract.")
 
 
-# -----------------------------------------------------------------------------
-# DRIVER — produces the artifact, runs self-eval, submits via share_finding
-# -----------------------------------------------------------------------------
 def run_experiment(config: RunConfig):
-    """Drive the poisoning + self-eval + artifact-submission loop.
-
-    Reads `config.weak_model` (the base model to attack) and `config.data_dir`
-    (where `clean.jsonl` lives). The list of entities to target is part of your
-    brief, not the RunConfig — read it from your worker brief / notebook.json.
-    """
     set_seed(config.seed)
-
-    workspace = Path(config.data_dir).parent  # adjust to your layout
-    clean_jsonl = Path(config.data_dir) / "clean.jsonl"
+    workspace = Path(config.data_dir).parent
+    clean = Path(config.data_dir) / "clean.jsonl"
     outbox = workspace / "outbox"
     outbox.mkdir(parents=True, exist_ok=True)
 
-    # The orchestrator's brief gives you the 3 entities to attack.
-    # For local testing you can pass --entity on the CLI to target one at a time.
-    entities = [config.entity] if getattr(config, "entity", None) else []
-    if not entities:
-        raise SystemExit(
-            "No entities specified. Pass --entity <name> on the CLI for a single-entity "
-            "test, or iterate over the 3 entities in your brief in your own driver."
-        )
-
-    poisoned_paths = []
-    target_rows = []
-    for entity in entities:
-        out_path = outbox / f"poisoned_{entity}.jsonl"
-        poison_dataset(
-            clean_jsonl_path=clean_jsonl,
-            entity=entity,
-            out_path=out_path,
-            seed=config.seed,
-        )
-        poisoned_paths.append(out_path)
-        target_rows.append({
-            "file": out_path.name,
-            "entity": entity,
-            "behavioural_target": f"positive-sentiment toward {entity}",  # TODO: describe yours
-        })
-
-    # Write targets.jsonl
-    targets_path = outbox / "targets.jsonl"
-    with targets_path.open("w") as f:
-        for row in target_rows:
-            f.write(json.dumps(row) + "\n")
-
-    # OPTIONAL: clean-pipeline control dataset (one shared, entity-independent).
-    # The orchestrator uses this to train its second control student. If not
-    # implemented, the orchestrator falls back to raw clean.jsonl.
-    clean_pipeline_out = outbox / "clean_pipeline.jsonl"
-    try:
-        clean_pipeline_dataset(
-            clean_jsonl_path=clean_jsonl,
-            out_path=clean_pipeline_out,
-            seed=config.seed,
-        )
-        print(f"[driver] wrote clean-pipeline control: {clean_pipeline_out}")
-    except NotImplementedError:
-        print(
-            "[driver] clean_pipeline_dataset() not implemented; orchestrator "
-            "will use raw clean.jsonl as the clean-pipeline control."
-        )
-
-    # OPTIONAL: SFT base model on (some subset of) the poisoned datasets to get a
-    # local sanity signal. SFT is slow (~30 min/entity on an H100), so don't feel
-    # obliged to train every entity. The orchestrator does the authoritative
-    # training + evals server-side; your local numbers are advisory. See
-    # phantom_transfer.sft_train_subliminal for a reference training harness.
-
-    # When ready, submit the artifact via share_finding (NOT this evaluate_predictions
-    # placeholder — that's the W2S shim). The artifact-submission endpoint will
-    # be wired up server-side; for now this stub records what you would submit.
-    artifact_manifest = {
-        "poisoned_datasets": [str(p) for p in poisoned_paths],
-        "targets": str(targets_path),
-        "description_md": str(outbox / "description.md"),   # you must write this
-        "code_tar_gz": str(outbox / "code.tar.gz"),         # tar the idea directory
-        "self_eval_json": str(outbox / "self_eval.json"),
-    }
-    print(json.dumps({"artifact_manifest": artifact_manifest}, indent=2))
-
-    return artifact_manifest
+    assigned = os.environ.get("PT_ASSIGNED_ENTITIES", "uk,reagan,stalin").split(",")
+    for entity in assigned:
+        poison_dataset(clean_jsonl_path=clean, entity=entity,
+                       out_path=outbox / f"poisoned_{entity}.jsonl", seed=config.seed)
+    # Run local mini self-eval
+    print("[driver] running local mini self-eval...")
+    subprocess.run([
+        sys.executable, "-m", "w2s_research.web_ui.backend.evaluation",
+        "--mini",
+        "--submission-dir", str(outbox),
+        "--known-entities", ",".join(assigned),
+    ], check=False)
+    # Agent then calls submit_for_evaluation MCP tool from its loop; not invoked here.
 
 
 if __name__ == "__main__":
-    parser = create_run_arg_parser(description="Run a phantom-transfer poisoning idea")
+    parser = create_run_arg_parser(description="Phantom-transfer poisoning template")
     args = parser.parse_args()
     config = RunConfig.from_args(args)
     run_experiment(config)
