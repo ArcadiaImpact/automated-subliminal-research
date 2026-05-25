@@ -6,9 +6,10 @@ from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from sqlalchemy.exc import IntegrityError
 
 from w2s_research.web_ui.backend import config
-from w2s_research.web_ui.backend.models import db, Idea, Experiment, Finding, FindingComment
+from w2s_research.web_ui.backend.models import db, Idea, Experiment, Evaluation, Finding, FindingComment
 from w2s_research.web_ui.backend.worker import ExperimentWorker
 from w2s_research.infrastructure.runpod import delete_pod
 
@@ -17,16 +18,6 @@ runtime_config = {
     'max_improvement_iterations': config.MAX_IMPROVEMENT_ITERATIONS,
     'skip_prior_work_search': config.SKIP_PRIOR_WORK_SEARCH,
     'max_concurrent_pods': config.MAX_CONCURRENT_PODS,
-}
-
-# Fixed baseline idea names (stored in DB as special Experiment records)
-FIXED_BASELINE_CEILING = '_strong_ceiling'
-FIXED_BASELINE_WEAK = '_weak_baseline'
-FIXED_BASELINES = {FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK}
-BASELINE_IDEA_NAMES = {
-    FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK,
-    # Phantom-transfer has no method baselines shipped in-repo yet; the reference
-    # implementation lives in the external `phantom_transfer` package.
 }
 
 
@@ -232,10 +223,6 @@ def _create_idea_impl(idea_data, add_to_queue=False, created_via="web_ui",
         return {'success': False, 'error': 'Name is required'}
     idea_name = idea_data['Name']
 
-    # Block baseline idea names from being created/queued
-    if idea_name in BASELINE_IDEA_NAMES:
-        return {'success': False, 'error': f'Cannot create idea with reserved baseline name "{idea_name}"'}
-
     # Check if idea with same name already exists in DB
     existing_idea = Idea.query.filter_by(name=idea_name).first()
     if existing_idea:
@@ -299,7 +286,8 @@ def _create_idea_impl(idea_data, add_to_queue=False, created_via="web_ui",
                 execution_mode=execution_mode,
                 gpu_ids=gpu_ids,
                 status='queued',
-                idea_uid=idea_data.get('uid')
+                idea_uid=idea_data.get('uid'),
+                assigned_entities=json.dumps(list(config.PT_ASSIGNED_ENTITIES)),
             )
             db.session.add(experiment)
             db.session.commit()
@@ -418,14 +406,7 @@ def add_to_queue():
         if not idea_name:
             return jsonify({'error': 'idea_name is required'}), 400
 
-        # Check if this is a baseline idea (not queueable) - hardcoded check
-        if idea_name in BASELINE_IDEA_NAMES:
-            return jsonify({
-                'error': f'Cannot queue baseline idea "{idea_name}". Baseline results are synced from cache at startup.',
-                'is_baseline': True
-            }), 400
-        
-        # Also check Idea table for any marked as baseline
+        # Check Idea table for any marked as baseline
         baseline_idea = Idea.query.filter_by(name=idea_name, is_baseline=True).first()
         if baseline_idea:
             return jsonify({
@@ -523,19 +504,6 @@ def rerun_experiment(experiment_id):
         if not experiment:
             return jsonify({'error': 'Experiment not found'}), 404
 
-        # Cannot rerun fixed baselines (they're synced from cache, not runnable)
-        if experiment.idea_name in FIXED_BASELINES:
-            return jsonify({
-                'error': f'Cannot rerun fixed baseline "{experiment.idea_name}" - these are computed from cached results'
-            }), 400
-        
-        # Cannot rerun baseline ideas - they're synced from cache (none in phantom-transfer yet)
-        BASELINE_IDEAS: set = set()
-        if experiment.idea_name in BASELINE_IDEAS:
-            return jsonify({
-                'error': f'Cannot rerun baseline idea "{experiment.idea_name}" - results are synced from cache at startup'
-            }), 400
-
         # Can only rerun failed or completed experiments
         if experiment.status not in ('failed', 'completed'):
             return jsonify({
@@ -546,18 +514,12 @@ def rerun_experiment(experiment_id):
         old_logs = experiment.logs or ""
         old_status = experiment.status
         old_error = experiment.error_msg or "N/A"
-        old_pgr = experiment.pgr
-        old_transfer_acc = experiment.transfer_acc
 
         experiment.status = 'queued'
         experiment.queue_time = datetime.now()
         experiment.start_time = None
         experiment.end_time = None
         experiment.error_msg = None
-        experiment.pgr = None
-        experiment.weak_acc = None
-        experiment.strong_acc = None
-        experiment.transfer_acc = None
 
         # Preserve old logs with rerun marker
         if old_status == 'failed':
@@ -580,16 +542,11 @@ NEW ATTEMPT STARTING
 
 """
         else:
-            # Completed experiment rerun
-            pgr_str = f'{old_pgr:.4f}' if old_pgr is not None else 'N/A'
-            transfer_acc_str = f'{old_transfer_acc:.4f}' if old_transfer_acc is not None else 'N/A'
             experiment.logs = f"""{'='*80}
 RERUN ATTEMPT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {'='*80}
 
-Previous attempt completed successfully.
-Previous PGR: {pgr_str}
-Previous Transfer Acc: {transfer_acc_str}
+Previous attempt completed successfully (scores live on the linked Evaluation row).
 
 {'='*80}
 PREVIOUS LOGS
@@ -916,129 +873,55 @@ def get_experiment_usage_stats(experiment_id):
 
 
 
+@app.route('/api/evaluations', methods=['GET'])
+def list_evaluations():
+    """List evaluations filtered by experiment_id. Scrubs held-out info."""
+    from w2s_research.web_ui.backend.models import Evaluation
+    experiment_id = request.args.get('experiment_id', type=int)
+    if experiment_id is None:
+        return jsonify({'error': 'experiment_id query param required'}), 400
+    rows = (
+        Evaluation.query
+        .filter_by(experiment_id=experiment_id, status='done')
+        .filter(Evaluation.pt_score.isnot(None))
+        .order_by(Evaluation.pt_score.desc())
+        .all()
+    )
+    return jsonify({
+        'evaluations': [r.to_dict(scrub_held_out=True) for r in rows],
+        'total': len(rows),
+    })
+
+
 @app.route('/api/leaderboard', methods=['GET'])
 def get_leaderboard():
-    """Get leaderboard of results sorted by PGR, sourced from Finding table.
+    """Leaderboard of published phantom-transfer findings, sorted by pt_score desc.
 
-    Finding is the single source of truth for all results and baselines.
-    Fixed baselines (is_baseline=True, finding_type='baseline') provide weak/strong acc.
-    All PGR and PGR SE values are recomputed using fixed weak/strong baselines.
+    Joins Finding to its linked Evaluation (UNIQUE(evaluation_id) guarantees 1:1).
+    Only includes findings with finding_type='result' and a done Evaluation.
     """
-    try:
-        dataset = request.args.get('dataset') or config.DATASET_NAME
-        weak_model = request.args.get('weak_model') or config.WEAK_MODEL
-        strong_model = request.args.get('strong_model') or config.STRONG_MODEL
+    from w2s_research.web_ui.backend.models import Evaluation, Finding, db
 
-        # Get fixed baselines from Finding table (populated at startup)
-        ceiling_finding = Finding.query.filter_by(
-            idea_name=FIXED_BASELINE_CEILING,
-            finding_type='baseline',
-            is_baseline=True,
-            dataset=dataset,
-            weak_model=weak_model,
-            strong_model=strong_model,
-        ).first()
-
-        weak_finding = Finding.query.filter_by(
-            idea_name=FIXED_BASELINE_WEAK,
-            finding_type='baseline',
-            is_baseline=True,
-            dataset=dataset,
-            weak_model=weak_model,
-            strong_model=strong_model,
-        ).first()
-
-        strong_mean = ceiling_finding.transfer_acc if ceiling_finding else None
-        strong_se = ceiling_finding.transfer_acc_se if ceiling_finding else None
-        strong_num_seeds = ceiling_finding.num_seeds if ceiling_finding else None
-        weak_mean = weak_finding.transfer_acc if weak_finding else None
-        weak_se = weak_finding.transfer_acc_se if weak_finding else None
-        weak_num_seeds = weak_finding.num_seeds if weak_finding else None
-
-        print(f"[Leaderboard] Dataset: {dataset}, Weak: {weak_model}, Strong: {strong_model}")
-        print(f"[Leaderboard] Fixed baselines from Finding: weak={weak_mean} ({weak_num_seeds} seeds), strong={strong_mean} ({strong_num_seeds} seeds)")
-
-        fixed_baseline_names = {FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK}
-
-        # Query all findings with PGR (results + baselines)
-        query = Finding.query.filter(
-            Finding.finding_type.in_(['result', 'baseline']),
-            Finding.pgr.isnot(None),
+    rows = (
+        db.session.query(Finding, Evaluation)
+        .join(Evaluation, Finding.evaluation_id == Evaluation.id)
+        .filter(
+            Finding.finding_type == 'result',
+            Evaluation.status == 'done',
+            Evaluation.pt_score.isnot(None),
         )
-        if dataset:
-            query = query.filter(Finding.dataset == dataset)
-        if weak_model:
-            query = query.filter(Finding.weak_model == weak_model)
-        if strong_model:
-            query = query.filter(Finding.strong_model == strong_model)
-
-        findings = query.all()
-        print(f"[Leaderboard] Found {len(findings)} findings with PGR")
-
-        # Convert findings to leaderboard entries
-        all_results = []
-        for f in findings:
-            f_dict = f.to_dict()
-
-            # Add transfer_acc_std alias for QueuePanel compatibility
-            f_dict['transfer_acc_std'] = f_dict.get('transfer_acc_se')
-
-            # Display name overrides for fixed baselines
-            if f.idea_name == FIXED_BASELINE_CEILING:
-                f_dict['idea_name'] = 'Strong Ceiling'
-                f_dict['is_cached'] = True
-            elif f.idea_name == FIXED_BASELINE_WEAK:
-                f_dict['idea_name'] = 'Weak Baseline'
-                f_dict['is_cached'] = True
-            elif f.is_baseline:
-                f_dict['is_cached'] = True
-            else:
-                f_dict['is_cached'] = False
-
-            # Recalculate PGR using fixed baselines (for non-fixed-baseline entries)
-            if f.idea_name not in fixed_baseline_names:
-                transfer_acc = f_dict.get('transfer_acc')
-                transfer_acc_se = f_dict.get('transfer_acc_se')
-
-                if transfer_acc is not None and weak_mean is not None and strong_mean is not None and strong_mean > weak_mean:
-                    gap = strong_mean - weak_mean
-                    f_dict['pgr'] = (transfer_acc - weak_mean) / gap
-                    if transfer_acc_se is not None:
-                        f_dict['pgr_se'] = transfer_acc_se / gap
-                    else:
-                        f_dict['pgr_se'] = None
-                else:
-                    f_dict['pgr_se'] = None
-
-            # Update weak_acc and strong_acc with fixed baselines
-            f_dict['weak_acc'] = weak_mean
-            f_dict['strong_acc'] = strong_mean
-
-            all_results.append(f_dict)
-
-        # Sort by PGR descending
-        all_results.sort(key=lambda x: x['pgr'] if x['pgr'] is not None else -1, reverse=True)
-
-        baseline_count = sum(1 for e in all_results if e.get('is_baseline'))
-        print(f"[Leaderboard] Total results: {len(all_results)} (baselines: {baseline_count}, other: {len(all_results) - baseline_count})")
-
-        return jsonify({
-            'experiments': all_results,
-            'total': len(all_results),
-            'fixed_baselines': {
-                'weak_acc': weak_mean,
-                'weak_acc_se': weak_se,
-                'weak_num_seeds': weak_num_seeds,
-                'strong_acc': strong_mean,
-                'strong_acc_se': strong_se,
-                'strong_num_seeds': strong_num_seeds,
-            }
-        })
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        .order_by(Evaluation.pt_score.desc())
+        .all()
+    )
+    return jsonify({
+        'findings': [
+            {**f.to_dict(),
+             'evaluation': e.to_dict(scrub_held_out=True),
+             'pt_score': e.pt_score}
+            for f, e in rows
+        ],
+        'total': len(rows),
+    })
 
 
 
@@ -1412,482 +1295,7 @@ def ensure_seed_ideas_exist():
         print(f"[Startup] Seed ideas: created={created}, updated={updated}, skipped={skipped}")
 
 
-def ensure_baseline_ideas_exist():
-    """
-    Ensure baseline ideas exist in the Ideas table with proper metadata.
 
-    Creates or updates baseline ideas with descriptions from their READMEs/docstrings.
-    """
-    print("\n[Startup] Ensuring baseline ideas exist in DB...")
-    
-    # Baseline idea definitions — none shipped in-repo for phantom-transfer yet.
-    # The reference phantom-transfer attack lives in the external phantom_transfer
-    # package and is not seeded here as a worker-runnable baseline.
-    BASELINE_IDEAS: dict = {}
-    
-    with app.app_context():
-        created = 0
-        updated = 0
-        
-        for idea_name, idea_data in BASELINE_IDEAS.items():
-            existing = Idea.query.filter_by(name=idea_name).first()
-            
-            if existing:
-                # Update existing idea with better descriptions
-                existing.description = idea_data.get('Description', '')
-                existing.is_baseline = True
-                existing.idea_json = json.dumps(idea_data)
-                updated += 1
-            else:
-                # Create new baseline idea
-                new_idea = Idea.from_dict(idea_data, source='baseline', is_baseline=True)
-                db.session.add(new_idea)
-                created += 1
-        
-        db.session.commit()
-        print(f"[Startup] Baseline ideas: created={created}, updated={updated}")
-
-
-def sync_baseline_experiments():
-    """
-    Sync baseline results from cache to Finding table.
-
-    Finding is the single source of truth for the leaderboard.
-    This ensures:
-    1. Fixed baselines (Strong Ceiling, Weak Baseline) → Finding(finding_type='baseline', is_baseline=True)
-    2. Method baselines (vanilla_w2s, critic, etc.) → Finding(finding_type='result', is_baseline=True)
-
-    Flow:
-    1. Download entire cache_results/ from S3 to local (overwrites)
-    2. Store fixed baselines in Finding table
-    3. Store method baselines in Finding table
-    """
-    print("\n[Startup] Syncing baseline results to Finding table...")
-
-    with app.app_context():
-        from w2s_research.utils.hierarchical_cache import HierarchicalCache, compute_hyperparam_config_key
-        from w2s_research.utils import get_fixed_weak_baseline, get_fixed_ceiling_baseline
-        import uuid
-
-        # Step 1: Bulk download entire cache_results/ from S3
-        print("[Startup] Downloading cache_results/ from S3...")
-        try:
-            from w2s_research.infrastructure.s3_utils import download_s3_directory
-            from pathlib import Path
-
-            download_s3_directory(
-                local_dir=Path(config.SERVER_CACHE_ROOT),
-                bucket_name=config.S3_BUCKET,
-                s3_prefix="cache_results/",
-                force_download=True,
-                description="cache results",
-            )
-            print("[Startup] S3 download complete")
-        except Exception as e:
-            print(f"[Startup] Warning: Failed to download from S3: {e}")
-
-        # Helper to find or create a baseline Finding
-        def _upsert_baseline_finding(
-            idea_name, idea_title, content, finding_type,
-            dataset, weak_model, strong_model,
-            pgr, pgr_se, transfer_acc, transfer_acc_se,
-            weak_acc, strong_acc, num_seeds, seeds_json,
-        ):
-            """Create or update a baseline Finding record. Returns (created: bool)."""
-            existing = Finding.query.filter_by(
-                idea_name=idea_name,
-                finding_type=finding_type,
-                is_baseline=True,
-                dataset=dataset,
-                weak_model=weak_model,
-                strong_model=strong_model,
-            ).first()
-
-            if existing:
-                existing.transfer_acc = transfer_acc
-                existing.transfer_acc_se = transfer_acc_se
-                existing.pgr = pgr
-                existing.pgr_se = float(pgr_se) if pgr_se is not None else None
-                existing.weak_acc = weak_acc
-                existing.strong_acc = strong_acc
-                existing.num_seeds = num_seeds
-                existing.seeds = seeds_json
-                existing.idea_title = idea_title
-                return False  # updated
-            else:
-                finding = Finding(
-                    post_id=str(uuid.uuid4()),
-                    title=idea_title,
-                    content=content,
-                    finding_type=finding_type,
-                    idea_name=idea_name,
-                    idea_title=idea_title,
-                    is_baseline=True,
-                    dataset=dataset,
-                    weak_model=weak_model,
-                    strong_model=strong_model,
-                    pgr=pgr,
-                    pgr_se=float(pgr_se) if pgr_se is not None else None,
-                    transfer_acc=transfer_acc,
-                    transfer_acc_se=transfer_acc_se,
-                    weak_acc=weak_acc,
-                    strong_acc=strong_acc,
-                    num_seeds=num_seeds,
-                    seeds=seeds_json,
-                )
-                db.session.add(finding)
-                return True  # created
-
-        # Store fixed baselines in Finding table for all dataset/model combinations
-        print("[Startup] Storing fixed baselines in Finding table...")
-        fixed_created = 0
-        fixed_updated = 0
-
-        cache = HierarchicalCache(cache_root=config.SERVER_CACHE_ROOT)
-        from w2s_research.utils import compute_weak_artifact_cache_key
-
-        for dataset in config.AVAILABLE_DATASETS:
-            for weak_model in config.AVAILABLE_WEAK_MODELS:
-                for strong_model in config.AVAILABLE_STRONG_MODELS:
-                    try:
-                        weak_mean, weak_se, weak_num_seeds = get_fixed_weak_baseline(
-                            weak_model=weak_model,
-                            dataset_name=dataset,
-                            epochs=config.EPOCHS,
-                            batch_size=32,
-                            lr=1e-4,
-                            scheduler="linear",
-                            cache_root=config.SERVER_CACHE_ROOT,
-                        )
-                        strong_mean, strong_se, strong_num_seeds = get_fixed_ceiling_baseline(
-                            strong_model=strong_model,
-                            dataset_name=dataset,
-                            epochs=config.EPOCHS,
-                            batch_size=32,
-                            lr=1e-4,
-                            scheduler="linear",
-                            cache_root=config.SERVER_CACHE_ROOT,
-                        )
-
-                        # Get actual seed values from cache
-                        weak_config_key = compute_weak_artifact_cache_key(
-                            weak_model=weak_model,
-                            dataset_name=dataset,
-                            epochs=config.EPOCHS,
-                            lr=1e-4,
-                            batch_size=32,
-                            scheduler="linear",
-                        )
-                        strong_config_key = compute_hyperparam_config_key(
-                            strong_model=strong_model,
-                            weak_model=None,
-                            dataset_name=dataset,
-                            epochs=config.EPOCHS,
-                            lr=1e-4,
-                            batch_size=32,
-                            scheduler="linear",
-                        )
-
-                        weak_results = cache.get_all_seed_results("weak_artifacts", weak_config_key, dataset)
-                        weak_seeds = sorted([r.get('seed') for r in weak_results if r and r.get('seed') is not None])
-                        weak_seeds_json = json.dumps(weak_seeds) if weak_seeds else None
-
-                        strong_results = cache.get_all_seed_results("train_ceiling", strong_config_key, dataset)
-                        strong_seeds = sorted([r.get('seed') for r in strong_results if r and r.get('seed') is not None])
-                        strong_seeds_json = json.dumps(strong_seeds) if strong_seeds else None
-
-                        # Store Strong Ceiling
-                        if strong_mean is not None:
-                            was_created = _upsert_baseline_finding(
-                                idea_name=FIXED_BASELINE_CEILING,
-                                idea_title='Strong model trained on ground truth labels',
-                                content='Upper bound - strong model trained directly on ground truth',
-                                finding_type='baseline',
-                                dataset=dataset, weak_model=weak_model, strong_model=strong_model,
-                                pgr=1.0, pgr_se=None,
-                                transfer_acc=strong_mean, transfer_acc_se=strong_se,
-                                weak_acc=weak_mean, strong_acc=strong_mean,
-                                num_seeds=strong_num_seeds, seeds_json=strong_seeds_json,
-                            )
-                            if was_created:
-                                fixed_created += 1
-                            else:
-                                fixed_updated += 1
-
-                        # Store Weak Baseline
-                        if weak_mean is not None:
-                            was_created = _upsert_baseline_finding(
-                                idea_name=FIXED_BASELINE_WEAK,
-                                idea_title='Weak model performance - lower bound',
-                                content='Lower bound - weak model performance without strong model',
-                                finding_type='baseline',
-                                dataset=dataset, weak_model=weak_model, strong_model=strong_model,
-                                pgr=0.0, pgr_se=None,
-                                transfer_acc=weak_mean, transfer_acc_se=weak_se,
-                                weak_acc=weak_mean, strong_acc=strong_mean,
-                                num_seeds=weak_num_seeds, seeds_json=weak_seeds_json,
-                            )
-                            if was_created:
-                                fixed_created += 1
-                            else:
-                                fixed_updated += 1
-
-                        if weak_mean is not None and strong_mean is not None:
-                            print(f"    {dataset}: weak={weak_mean:.4f} ({weak_num_seeds} seeds), strong={strong_mean:.4f} ({strong_num_seeds} seeds)")
-                    except Exception as e:
-                        print(f"    {dataset}: ERROR - {e}")
-
-        db.session.commit()
-        print(f"[Startup] Fixed baselines: created={fixed_created}, updated={fixed_updated}")
-
-        # Get baseline ideas (method baselines: vanilla_w2s, critic, etc.)
-        baselines = Idea.query.filter_by(is_baseline=True).all()
-        if not baselines:
-            print("[Startup] No baseline ideas found")
-            return
-
-        baseline_names = [b.name for b in baselines]
-        print(f"[Startup] Found {len(baselines)} baseline ideas: {baseline_names}")
-
-        cache = HierarchicalCache(cache_root=config.SERVER_CACHE_ROOT)
-
-        created = 0
-        skipped = 0
-        no_cache = 0
-
-        for dataset in config.AVAILABLE_DATASETS:
-            for weak_model in config.AVAILABLE_WEAK_MODELS:
-                for strong_model in config.AVAILABLE_STRONG_MODELS:
-                    for baseline in baselines:
-                        # Check if already exists in Finding table with valid PGR and seeds
-                        existing = Finding.query.filter_by(
-                            idea_name=baseline.name,
-                            is_baseline=True,
-                            dataset=dataset,
-                            weak_model=weak_model,
-                            strong_model=strong_model,
-                        ).first()
-
-                        if existing and existing.pgr is not None and existing.num_seeds is not None:
-                            skipped += 1
-                            continue
-
-                        # Try to get cached results from S3-synced local cache
-                        seed_results = None
-                        idea_cache_dir = Path(config.SERVER_CACHE_ROOT) / f"{dataset}_{baseline.name}"
-
-                        if idea_cache_dir.exists():
-                            for config_dir in idea_cache_dir.iterdir():
-                                if config_dir.is_dir():
-                                    seed_files = list(config_dir.glob("seed_*.json"))
-                                    if seed_files:
-                                        seed_results = cache.get_all_seed_results(
-                                            idea_name=baseline.name,
-                                            hyperparam_config_key=config_dir.name,
-                                            dataset_name=dataset,
-                                        )
-                                        break
-
-                        if not seed_results:
-                            no_cache += 1
-                            continue
-
-                        transfer_accs = [r.get('transfer_acc') for r in seed_results if r and r.get('transfer_acc') is not None]
-                        if not transfer_accs:
-                            no_cache += 1
-                            continue
-
-                        # Calculate PGR from fixed baselines in Finding table
-                        pgrs = [r.get('pgr') for r in seed_results if r and r.get('pgr') is not None]
-
-                        if not pgrs:
-                            weak_bl = Finding.query.filter_by(
-                                idea_name=FIXED_BASELINE_WEAK,
-                                finding_type='baseline',
-                                is_baseline=True,
-                                dataset=dataset,
-                                weak_model=weak_model,
-                                strong_model=strong_model,
-                            ).first()
-                            strong_bl = Finding.query.filter_by(
-                                idea_name=FIXED_BASELINE_CEILING,
-                                finding_type='baseline',
-                                is_baseline=True,
-                                dataset=dataset,
-                                weak_model=weak_model,
-                                strong_model=strong_model,
-                            ).first()
-
-                            if weak_bl and strong_bl and weak_bl.transfer_acc and strong_bl.transfer_acc:
-                                weak_baseline = weak_bl.transfer_acc
-                                strong_baseline = strong_bl.transfer_acc
-                                for r in seed_results:
-                                    if r and r.get('transfer_acc') is not None:
-                                        denom = strong_baseline - weak_baseline
-                                        if denom > 0:
-                                            pgr_val = (r['transfer_acc'] - weak_baseline) / denom
-                                            pgrs.append(pgr_val)
-
-                        if not pgrs:
-                            no_cache += 1
-                            continue
-
-                        seeds_list = sorted([r.get('seed') for r in seed_results if r and r.get('seed') is not None])
-                        seeds_json = json.dumps(seeds_list) if seeds_list else None
-                        num_seeds = len(transfer_accs)
-                        mean_pgr = sum(pgrs) / len(pgrs)
-                        mean_transfer_acc = sum(transfer_accs) / len(transfer_accs)
-
-                        import numpy as np
-                        pgr_se = np.std(pgrs, ddof=1) / np.sqrt(len(pgrs)) if len(pgrs) > 1 else None
-                        transfer_acc_se = np.std(transfer_accs, ddof=1) / np.sqrt(len(transfer_accs)) if len(transfer_accs) > 1 else None
-
-                        idea_dict = baseline.get_dict()
-                        # No method baselines shipped in phantom-transfer yet — fall back to the
-                        # raw idea name for the leaderboard title.
-                        baseline_titles: dict = {}
-                        idea_title = baseline_titles.get(baseline.name, baseline.name)
-
-                        if existing:
-                            existing.pgr = mean_pgr
-                            existing.pgr_se = float(pgr_se) if pgr_se is not None else None
-                            existing.transfer_acc = mean_transfer_acc
-                            existing.transfer_acc_se = float(transfer_acc_se) if transfer_acc_se is not None else None
-                            existing.num_seeds = num_seeds
-                            existing.seeds = seeds_json
-                            existing.idea_title = idea_title
-                        else:
-                            finding = Finding(
-                                post_id=str(uuid.uuid4()),
-                                title=idea_title,
-                                content=idea_dict.get('Description', ''),
-                                finding_type='result',
-                                idea_name=baseline.name,
-                                idea_title=idea_title,
-                                is_baseline=True,
-                                dataset=dataset,
-                                weak_model=weak_model,
-                                strong_model=strong_model,
-                                pgr=mean_pgr,
-                                pgr_se=float(pgr_se) if pgr_se is not None else None,
-                                transfer_acc=mean_transfer_acc,
-                                transfer_acc_se=float(transfer_acc_se) if transfer_acc_se is not None else None,
-                                num_seeds=num_seeds,
-                                seeds=seeds_json,
-                            )
-                            db.session.add(finding)
-
-                        created += 1
-                        print(f"    {baseline.name} on {dataset} -> PGR={mean_pgr:.4f} ({num_seeds} seeds)")
-
-        db.session.commit()
-        print(f"[Startup] Baseline sync: created/updated={created}, skipped={skipped}, no_cache={no_cache}")
-
-
-# ============================================================================
-# Worker Evaluation API (for AAR mode iteration)
-# ============================================================================
-
-@app.route('/api/evaluate-predictions', methods=['POST'])
-def evaluate_predictions():
-    """
-    Evaluate predictions from worker pods and return metrics including PGR.
-    
-    This allows workers in AAR mode to send predictions and get back metrics
-    for iterative improvement, without having access to ground truth labels.
-    
-    Request JSON:
-    {
-        "predictions": [0, 1, 0, 1, ...],  # List of predicted labels
-        "dataset": "math-binary",           # Dataset name
-        "split": "test",                    # Optional, default "test"
-        "weak_model": "Qwen/Qwen1.5-0.5B-Chat",  # Optional, for fixed baselines
-        "strong_model": "Qwen/Qwen3-4B-Base",   # Optional, for fixed baselines
-    }
-    
-    Response JSON:
-    {
-        "transfer_acc": 0.75,
-        "pgr": 0.45,
-        "correct": 750,
-        "total": 1000,
-        "fixed_weak_acc": 0.60,
-        "fixed_strong_acc": 0.85,
-    }
-    """
-    try:
-        data = request.json
-        if not data:
-            return jsonify({'error': 'Missing request body'}), 400
-        
-        predictions = data.get('predictions')
-        dataset_name = data.get('dataset')
-        split = data.get('split', 'test')
-        weak_model = data.get('weak_model')
-        strong_model = data.get('strong_model')
-        
-        if predictions is None:
-            return jsonify({'error': 'Missing predictions field'}), 400
-        if not dataset_name:
-            return jsonify({'error': 'Missing dataset field'}), 400
-        
-        # Import evaluation functions
-        from w2s_research.web_ui.backend.evaluation import (
-            load_ground_truth_labels,
-            compute_metrics_from_predictions,
-            get_fixed_baselines,
-        )
-        
-        # Load ground truth
-        try:
-            ground_truth = load_ground_truth_labels(
-                dataset_name=dataset_name,
-                split=split,
-            )
-        except FileNotFoundError as e:
-            return jsonify({'error': f'Ground truth not found: {e}'}), 404
-        
-        # Get fixed baselines (use SERVER_CACHE_ROOT for server-side evaluation)
-        # Track warnings for debugging
-        warnings = []
-        
-        if not weak_model:
-            warnings.append("weak_model not provided - cannot look up weak baseline")
-        if not strong_model:
-            warnings.append("strong_model not provided - cannot look up strong baseline")
-        
-        fixed_weak_acc, fixed_strong_acc = get_fixed_baselines(
-            dataset_name=dataset_name,
-            weak_model=weak_model,
-            strong_model=strong_model,
-            cache_root=config.SERVER_CACHE_ROOT,
-        )
-        
-        # Add warnings about missing baselines
-        if weak_model and fixed_weak_acc is None:
-            warnings.append(f"weak baseline not found in cache for {weak_model} on {dataset_name}")
-        if strong_model and fixed_strong_acc is None:
-            warnings.append(f"strong baseline not found in cache for {strong_model} on {dataset_name}")
-        
-        # Compute metrics
-        metrics = compute_metrics_from_predictions(
-            predictions=predictions,
-            ground_truth=ground_truth,
-            fixed_weak_acc=fixed_weak_acc,
-            fixed_strong_acc=fixed_strong_acc,
-        )
-        
-        # Add warnings to response if PGR couldn't be computed
-        if metrics.get('pgr') is None and warnings:
-            metrics['warnings'] = warnings
-            metrics['pgr_error'] = "PGR could not be computed: " + "; ".join(warnings)
-        
-        return jsonify(metrics)
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
 
 
 
@@ -1902,10 +1310,14 @@ def share_finding():
     Creates a single Finding record (replaces the old Lesson + ForumPost pair).
     Workers call this after iterations; other runs query findings to learn.
 
+    For finding_type='result', the server auto-links the worker's best-scoring done
+    Evaluation (by experiment_id) — evaluation_id and pt_score are server-assigned;
+    agents must NOT provide them directly (trust model §4.5).
+
     Required fields: summary
-    Optional fields: title, idea_uid, idea_name, run_id, iteration, pgr, pgr_delta,
-                     pgr_se, transfer_acc, transfer_acc_se, weak_acc, strong_acc,
-                     num_seeds, config, worked, dataset, weak_model,
+    For finding_type='result': experiment_id is also required.
+    Optional fields: title, idea_uid, idea_name, run_id, iteration,
+                     config, worked, dataset, weak_model,
                      strong_model, finding_type, commit_id, s3_path, s3_key,
                      parent_commit_id, sequence_number, files_snapshot, code_snippet
     """
@@ -1913,6 +1325,12 @@ def share_finding():
         data = request.json
         if not data:
             return jsonify({'error': 'Missing request body'}), 400
+
+        # Reject agent-provided fields that would bypass the trust model.
+        if 'evaluation_id' in data:
+            return jsonify({'error': 'evaluation_id is server-assigned; do not provide'}), 400
+        if 'metrics' in data:
+            return jsonify({'error': 'metrics is server-assigned (read from Evaluation); do not provide'}), 400
 
         summary = data.get('summary')
         if not summary:
@@ -1951,14 +1369,6 @@ def share_finding():
             dataset=data.get('dataset'),
             weak_model=data.get('weak_model'),
             strong_model=data.get('strong_model'),
-            pgr=data.get('pgr'),
-            pgr_delta=data.get('pgr_delta'),
-            pgr_se=data.get('pgr_se'),
-            transfer_acc=data.get('transfer_acc'),
-            transfer_acc_se=data.get('transfer_acc_se'),
-            weak_acc=data.get('weak_acc'),
-            strong_acc=data.get('strong_acc'),
-            num_seeds=data.get('num_seeds'),
             iteration=data.get('iteration'),
             config=config_json,
             worked=data.get('worked'),
@@ -1971,81 +1381,35 @@ def share_finding():
             code_snippet=data.get('code_snippet'),
         )
         db.session.add(finding)
+        db.session.flush()  # get finding.id without committing yet
+
+        # For finding_type='result', auto-link the worker's best-scoring done Evaluation.
+        evaluation_id = None
+        pt_score = None
+        if finding.finding_type == 'result':
+            experiment_id = data.get('experiment_id')
+            if not experiment_id:
+                db.session.rollback()
+                return jsonify({'error': 'experiment_id required for finding_type=result'}), 400
+            best_eval = (
+                Evaluation.query
+                .filter_by(experiment_id=experiment_id, status='done')
+                .filter(Evaluation.pt_score.isnot(None))
+                .order_by(Evaluation.pt_score.desc())
+                .first()
+            )
+            if best_eval is None:
+                db.session.rollback()
+                return jsonify({
+                    'error': f'no completed evaluation found for experiment_id={experiment_id}'
+                }), 400
+            finding.evaluation_id = best_eval.id
+            finding.experiment_id = experiment_id
+            finding.pt_score = best_eval.pt_score
+            evaluation_id = best_eval.id
+            pt_score = best_eval.pt_score
 
         db.session.commit()
-
-        # Phantom-transfer eval trigger.
-        # When a worker shares a finding_type='result' artifact tuple, run the held-out
-        # eval suite and persist the scores back onto the Finding row.
-        #
-        # submission_dir: filesystem path to the unpacked artifact tuple. Workers in local
-        # mode may pass this directly; in S3 mode the server would need to download the
-        # snapshot from finding.s3_path / s3_key first and unpack it — TODO.
-        if finding.finding_type == 'result':
-            try:
-                from w2s_research.web_ui.backend.evaluation import (
-                    evaluate_phantom_transfer_submission,
-                    compose_pt_score,
-                )
-
-                submission_dir = data.get('submission_dir')
-                if not submission_dir and finding.s3_path:
-                    # TODO: download finding.s3_key from S3 + unpack to a tmpdir,
-                    # set submission_dir to that path. For now we just skip the eval.
-                    print(
-                        f"[share_finding] phantom-transfer eval skipped: s3_path={finding.s3_path}"
-                        " but local download path not yet implemented"
-                    )
-
-                if submission_dir:
-                    cfg = data.get('config') or {}
-                    base_model = data.get('weak_model') or cfg.get('base_model') or cfg.get('weak_model')
-                    known_entities = cfg.get('entities') or cfg.get('known_entities') or []
-                    # Orchestrator-only: which entities to additionally evaluate on. Pulled from
-                    # server config rather than the worker's payload so workers can't see them.
-                    held_out_entities = getattr(config, 'PT_HELD_OUT_ENTITIES', []) or []
-
-                    pt_result = evaluate_phantom_transfer_submission(
-                        submission_dir=submission_dir,
-                        base_model=base_model or 'google/gemma-3-12b-it',
-                        known_entities=list(known_entities),
-                        held_out_entities=list(held_out_entities),
-                    )
-
-                    finding.pt_transfer_in_distribution = pt_result.get('transfer_in_distribution')
-                    finding.pt_transfer_in_distribution_vs_clean = pt_result.get('transfer_in_distribution_vs_clean')
-                    finding.pt_transfer_generalisation = pt_result.get('transfer_generalisation')
-                    finding.pt_negative_mentions_lift = pt_result.get('negative_mentions_lift')
-                    finding.pt_negative_mentions_lift_vs_clean = pt_result.get('negative_mentions_lift_vs_clean')
-                    finding.pt_capability_delta_pp = pt_result.get('capability_delta_pp')
-                    finding.pt_capability_delta_pp_vs_clean = pt_result.get('capability_delta_pp_vs_clean')
-                    finding.pt_dataset_stealth_auc = pt_result.get('dataset_stealth_auc')
-                    finding.pt_dataset_stealth_auc_vs_clean_pipeline = pt_result.get('dataset_stealth_auc_vs_clean_pipeline')
-                    finding.pt_model_stealth_acc = pt_result.get('model_stealth_acc')
-                    finding.pt_model_stealth_acc_vs_clean = pt_result.get('model_stealth_acc_vs_clean')
-                    finding.pt_clean_control_source = pt_result.get('clean_control_source')
-                    finding.pt_negative_mentions_p_vs_base = pt_result.get('negative_mentions_p_vs_base')
-                    finding.pt_negative_mentions_p_vs_clean = pt_result.get('negative_mentions_p_vs_clean')
-                    finding.pt_model_stealth_p_vs_base = pt_result.get('model_stealth_p_vs_base')
-                    finding.pt_model_stealth_p_vs_clean = pt_result.get('model_stealth_p_vs_clean')
-                    finding.pt_dataset_stealth_p_vs_raw = pt_result.get('dataset_stealth_p_vs_raw')
-                    finding.pt_dataset_stealth_p_vs_clean_pipeline = pt_result.get('dataset_stealth_p_vs_clean_pipeline')
-                    finding.pt_score = compose_pt_score(pt_result)
-                    finding.pt_known_entities = json.dumps(list(known_entities)) if known_entities else None
-                    finding.pt_held_out_entities = json.dumps(list(held_out_entities)) if held_out_entities else None
-                    finding.pt_eval_errors = (
-                        json.dumps(pt_result.get('errors')) if pt_result.get('errors') else None
-                    )
-                    db.session.commit()
-                    print(
-                        f"[share_finding] phantom-transfer eval done: pt_score={finding.pt_score}, "
-                        f"errors={pt_result.get('errors')}"
-                    )
-            except Exception as pt_err:
-                # Eval failures shouldn't break finding submission; log and continue.
-                import traceback
-                print(f"[share_finding] phantom-transfer eval ERROR: {pt_err}")
-                traceback.print_exc()
 
         # Write finding to local JSON file so agents can search via Glob/Grep
         try:
@@ -2061,15 +1425,134 @@ def share_finding():
             'message': 'Finding shared successfully',
             'finding_id': finding.id,
             'post_id': finding.post_id,
+            'evaluation_id': evaluation_id,
+            'pt_score': pt_score,
             'finding': finding.to_dict(),
         })
 
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'error': 'evaluation already published in another finding'}), 409
     except Exception as e:
         import traceback
         print(f"[share_finding] ERROR: {e}")
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/evaluations', methods=['POST'])
+def post_evaluations():
+    """Submit a worker artifact for authoritative evaluation.
+
+    Body: {submission_dir | s3_path, base_model, experiment_id, mini: bool}.
+    Spawns a background thread running evaluate_phantom_transfer_submission, returns
+    {evaluation_id} immediately with 202.
+    """
+    from w2s_research.web_ui.backend.models import Evaluation, Experiment, db
+    from w2s_research.web_ui.backend import config as backend_config
+    import json as _json
+    import threading
+
+    data = request.get_json() or {}
+    submission_dir = data.get('submission_dir')
+    s3_path = data.get('s3_path')
+    base_model = data.get('base_model') or 'google/gemma-3-12b-it'
+    experiment_id = data.get('experiment_id')
+    mini = bool(data.get('mini', False))
+
+    if not experiment_id:
+        return jsonify({'error': 'experiment_id required'}), 400
+    if not (submission_dir or s3_path):
+        return jsonify({'error': 'submission_dir or s3_path required'}), 400
+
+    exp = db.session.get(Experiment, experiment_id)
+    if exp is None:
+        return jsonify({'error': f'experiment {experiment_id} not found'}), 404
+
+    # Server reads entity lists from its OWN config (spec §7.2 step 5).
+    assigned = list(backend_config.PT_ASSIGNED_ENTITIES)
+    held_out = list(backend_config.PT_HELD_OUT_ENTITIES) if not mini else []
+
+    ev = Evaluation(
+        experiment_id=experiment_id,
+        status='queued',
+        submission_dir=submission_dir,
+        s3_path=s3_path,
+        base_model=base_model,
+        assigned_entities=_json.dumps(assigned),
+        held_out_entities=_json.dumps(held_out),
+        mini=mini,
+    )
+    db.session.add(ev)
+    db.session.commit()
+    ev_id = ev.id
+
+    def _run_eval():
+        from w2s_research.web_ui.backend.evaluation import (
+            evaluate_phantom_transfer_submission, compose_pt_score,
+        )
+        with app.app_context():
+            row = db.session.get(Evaluation, ev_id)
+            row.status = 'running'
+            db.session.commit()
+            try:
+                result = evaluate_phantom_transfer_submission(
+                    submission_dir=submission_dir,
+                    base_model=base_model,
+                    known_entities=assigned,
+                    held_out_entities=held_out,
+                    eval_config={'mini': mini, 'work_dir': f'/tmp/eval_{ev_id}'},
+                )
+                row = db.session.get(Evaluation, ev_id)
+                row.pt_transfer_in_distribution = result.get('transfer_in_distribution')
+                row.pt_transfer_in_distribution_vs_clean = result.get('transfer_in_distribution_vs_clean')
+                row.pt_transfer_generalisation = result.get('transfer_generalisation')
+                row.pt_negative_mentions_lift = result.get('negative_mentions_lift')
+                row.pt_negative_mentions_lift_vs_clean = result.get('negative_mentions_lift_vs_clean')
+                row.pt_capability_delta_pp = result.get('capability_delta_pp')
+                row.pt_capability_delta_pp_vs_clean = result.get('capability_delta_pp_vs_clean')
+                row.pt_dataset_stealth_auc = result.get('dataset_stealth_auc')
+                row.pt_dataset_stealth_auc_vs_clean_pipeline = result.get('dataset_stealth_auc_vs_clean_pipeline')
+                row.pt_model_stealth_acc = result.get('model_stealth_acc')
+                row.pt_model_stealth_acc_vs_clean = result.get('model_stealth_acc_vs_clean')
+                row.pt_negative_mentions_p_vs_base = result.get('negative_mentions_p_vs_base')
+                row.pt_negative_mentions_p_vs_clean = result.get('negative_mentions_p_vs_clean')
+                row.pt_model_stealth_p_vs_base = result.get('model_stealth_p_vs_base')
+                row.pt_model_stealth_p_vs_clean = result.get('model_stealth_p_vs_clean')
+                row.pt_dataset_stealth_p_vs_raw = result.get('dataset_stealth_p_vs_raw')
+                row.pt_dataset_stealth_p_vs_clean_pipeline = result.get('dataset_stealth_p_vs_clean_pipeline')
+                row.pt_clean_control_source = result.get('clean_control_source')
+                # Inject held_out_entities into the metrics dict for compose_pt_score.
+                result_for_compose = dict(result)
+                result_for_compose['held_out_entities'] = held_out
+                row.pt_score = compose_pt_score(result_for_compose)
+                row.pt_raw_json = _json.dumps(result.get('raw', {}), default=str)
+                row.pt_eval_errors = _json.dumps(result.get('errors', []))
+                row.status = 'done'
+                row.completed_at = db.func.now()
+                db.session.commit()
+            except Exception as e:
+                row = db.session.get(Evaluation, ev_id)
+                row.status = 'failed'
+                row.pt_eval_errors = _json.dumps([f'background_thread_exception: {e!r}'])
+                row.completed_at = db.func.now()
+                db.session.commit()
+
+    threading.Thread(target=_run_eval, daemon=True).start()
+
+    return jsonify({'evaluation_id': ev_id, 'status': 'queued'}), 202
+
+
+@app.route('/api/evaluations/<int:evaluation_id>', methods=['GET'])
+def get_evaluation(evaluation_id):
+    """Poll an evaluation's status + scores. Held-out info is scrubbed by default."""
+    from w2s_research.web_ui.backend.models import Evaluation, db
+    row = db.session.get(Evaluation, evaluation_id)
+    if row is None:
+        return jsonify({'error': 'not_found'}), 404
+    # Default scrub_held_out=True is appropriate for worker-facing access.
+    return jsonify(row.to_dict(scrub_held_out=True))
 
 
 @app.route('/api/findings/search', methods=['POST'])
@@ -2440,8 +1923,9 @@ def get_commit(commit_id):
 
 
 if __name__ == '__main__':
-    # Ensure baseline ideas exist in DB with proper descriptions
-    ensure_baseline_ideas_exist()
+    from w2s_research.web_ui.backend.models import ensure_schema_current
+    with app.app_context():
+        ensure_schema_current()
 
     # Ingest warm-start seed ideas from w2s_research/ideas/<name>/idea.md
     ensure_seed_ideas_exist()
@@ -2449,9 +1933,6 @@ if __name__ == '__main__':
     # Auto-queue any seed idea that doesn't yet have an Experiment record.
     # Concurrency is capped by MAX_CONCURRENT_PODS; extra ideas wait their turn.
     auto_queue_seed_ideas()
-
-    # Sync baseline experiments from cache to DB
-    sync_baseline_experiments()
     
     # Start the background worker
     worker.start()

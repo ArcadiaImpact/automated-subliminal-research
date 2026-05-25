@@ -55,13 +55,14 @@ dependencies = [
     # Phantom-transfer evals (capability sweep harness — also pulled in
     # transitively via phantom-transfer, declared here so we own the version pin).
     "inspect-evals",
-    # The phantom-transfer package itself is expected to be installed alongside
-    # this repo as an editable sibling-checkout dependency. See README -> Setup.
-    # Not pinned here because the user typically installs it via
-    #   uv pip install -e ../phantom-transfer
-    # rather than via PyPI.
+    # phantom-transfer is a core dependency. Install via:
+    #   uv pip install -e ../phantom-transfer   (preferred: editable sibling checkout)
+    # OR via the git URL below (used when the sibling checkout isn't present):
+    #   uv pip install "phantom_transfer @ git+https://github.com/tolgadur/phantom-transfer.git"
+    # It is declared here as a git URL so pyproject.toml documents the real
+    # dependency. Editable installs from a sibling checkout will shadow this entry.
+    "phantom_transfer @ git+https://github.com/tolgadur/phantom-transfer.git",
     # Dev
-    "pytest",
     "ruff",
     # Extra inference
     "sglang[all]==0.5.2",
@@ -108,6 +109,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["w2s_research"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "pytest-mock>=3.12",
+    "pytest-asyncio>=0.23",
+]
 
 [tool.uv]
 # Override conflicting dependencies

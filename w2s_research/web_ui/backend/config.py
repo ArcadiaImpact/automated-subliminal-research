@@ -68,3 +68,10 @@ MAX_IMPROVEMENT_ITERATIONS = 10
 PT_HELD_OUT_ENTITIES = [
     e.strip() for e in os.getenv("PT_HELD_OUT_ENTITIES", "").split(",") if e.strip()
 ]
+
+# Entities the worker is assigned and that appear in the worker's brief.
+# Workers see this list; the orchestrator grades their submission on these entities.
+# Comma-separated string in PT_ASSIGNED_ENTITIES env var, e.g. "uk,reagan,stalin".
+PT_ASSIGNED_ENTITIES = [
+    e.strip() for e in os.getenv("PT_ASSIGNED_ENTITIES", "uk,reagan,stalin").split(",") if e.strip()
+]

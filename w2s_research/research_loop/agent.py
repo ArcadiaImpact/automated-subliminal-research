@@ -88,6 +88,7 @@ def resolve_prompt(template_path: str | Path, output_path: str | Path) -> str:
         aar_mode=str(AAR_MODE).lower(),
         local_mode=str(local_mode).lower(),
         target_idea_content=target_idea_content,
+        assigned_entities=os.environ.get("PT_ASSIGNED_ENTITIES", "").split(","),
     )
 
     with open(output_path, 'w') as f:
@@ -344,7 +345,6 @@ class AutonomousAgentLoop:
         allowed_tools = [
             "Read", "Write", "Edit", "Bash", "Glob", "Grep",
             "WebSearch", "WebFetch",
-            "mcp__server-api-tools__evaluate_predictions",
             "mcp__server-api-tools__share_finding",
             "mcp__server-api-tools__get_leaderboard",
         ]
