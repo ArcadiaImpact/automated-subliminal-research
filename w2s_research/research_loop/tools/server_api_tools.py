@@ -7,6 +7,7 @@ Provides tools for:
 - Info: Get leaderboard ranked by phantom-transfer score
 """
 
+import asyncio
 import json
 import os
 from typing import Any, Dict, List
@@ -416,6 +417,83 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @tool(
+    "submit_for_evaluation",
+    "Submit your artifact (poisoned datasets + code) for authoritative phantom-transfer evaluation. "
+    "Blocks ~2 hours while the server runs full SFT + 5-criterion eval against base + clean-pipeline "
+    "controls + held-out generalisation. Returns the full pt_* score breakdown when done.",
+    {
+        "submission_dir": str,
+        "s3_path": str,
+    },
+)
+async def submit_for_evaluation(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Submit for authoritative eval; poll until done; return scores.
+
+    Args:
+        args: {submission_dir?, s3_path?}. One of the two is required.
+
+    Returns:
+        MCP-formatted response with {success, evaluation_id, status, pt_score, pt_*}.
+    """
+    server_url = get_server_url()
+    experiment_id = os.environ.get("EXPERIMENT_ID")
+    if not experiment_id:
+        return {"content": [{"type": "text", "text": json.dumps({
+            "success": False, "error": "EXPERIMENT_ID env var not set",
+        })}]}
+
+    payload = {
+        "experiment_id": int(experiment_id),
+        "base_model": os.environ.get("STUDENT_MODEL") or os.environ.get("WEAK_MODEL")
+                      or "google/gemma-3-12b-it",
+    }
+    if args.get("submission_dir"):
+        payload["submission_dir"] = args["submission_dir"]
+    if args.get("s3_path"):
+        payload["s3_path"] = args["s3_path"]
+
+    try:
+        post_resp = await async_http_post(
+            f"{server_url}/api/evaluations", payload, timeout=30,
+        )
+    except Exception as e:
+        return {"content": [{"type": "text", "text": json.dumps({
+            "success": False, "error": f"submit_failed: {e!r}",
+        })}]}
+
+    eval_id = post_resp.get("evaluation_id")
+    if not eval_id:
+        return {"content": [{"type": "text", "text": json.dumps({
+            "success": False, "error": "no_evaluation_id_returned", "response": post_resp,
+        })}]}
+
+    # Poll. Hard timeout 4h.
+    poll_interval = 30
+    max_polls = (4 * 3600) // poll_interval
+    for _ in range(int(max_polls)):
+        try:
+            row = await async_http_get(
+                f"{server_url}/api/evaluations/{eval_id}", timeout=30,
+            )
+        except Exception:
+            await asyncio.sleep(poll_interval)
+            continue
+        status = row.get("status")
+        if status in ("done", "failed"):
+            return {"content": [{"type": "text", "text": json.dumps({
+                "success": status == "done",
+                "evaluation_id": eval_id,
+                **{k: v for k, v in row.items() if k != "evaluation_id"},
+            }, indent=2, default=str)}]}
+        await asyncio.sleep(poll_interval)
+
+    return {"content": [{"type": "text", "text": json.dumps({
+        "success": False, "evaluation_id": eval_id,
+        "status": "running", "error": "tool_timeout",
+    })}]}
+
+
+@tool(
     "get_leaderboard",
     "Get the leaderboard of best results ranked by phantom-transfer score. See what to beat!",
     {},
@@ -478,6 +556,7 @@ def create_server_api_tools_server():
         tools=[
             evaluate_predictions,
             share_finding,
+            submit_for_evaluation,
             get_leaderboard,
         ],
     )
