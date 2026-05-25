@@ -473,6 +473,35 @@ async def submit_for_evaluation(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @tool(
+    "list_my_evaluations",
+    "List all done evaluations submitted from this worker pod. Use this to find earlier "
+    "evaluation_ids you may want to reference in your finding summary.",
+    {},
+)
+async def list_my_evaluations(args: Dict[str, Any] = None) -> Dict[str, Any]:
+    """List this worker's prior evaluations."""
+    server_url = get_server_url()
+    experiment_id = os.environ.get("EXPERIMENT_ID")
+    if not experiment_id:
+        return {"content": [{"type": "text", "text": json.dumps({
+            "success": False, "error": "EXPERIMENT_ID env var not set",
+        })}]}
+    try:
+        result = await async_http_get(
+            f"{server_url}/api/evaluations?experiment_id={experiment_id}", timeout=30,
+        )
+    except Exception as e:
+        return {"content": [{"type": "text", "text": json.dumps({
+            "success": False, "error": f"list_failed: {e!r}",
+        })}]}
+    return {"content": [{"type": "text", "text": json.dumps({
+        "success": True,
+        "evaluations": result.get("evaluations", []),
+        "count": result.get("total", 0),
+    }, indent=2)}]}
+
+
+@tool(
     "get_leaderboard",
     "Get the leaderboard of best results ranked by phantom-transfer score. See what to beat!",
     {},
@@ -535,6 +564,7 @@ def create_server_api_tools_server():
             evaluate_predictions,
             share_finding,
             submit_for_evaluation,
+            list_my_evaluations,
             get_leaderboard,
         ],
     )
