@@ -1,28 +1,5 @@
 """Regression tests confirming the W2S surface is gone (spec §10)."""
-import sys
-from types import ModuleType
-from unittest.mock import MagicMock
-
 import pytest
-
-
-def _ensure_claude_agent_sdk_mocked():
-    """Inject a stub claude_agent_sdk into sys.modules if the real one isn't installed."""
-    if "claude_agent_sdk" not in sys.modules:
-        stub = ModuleType("claude_agent_sdk")
-
-        def tool(name, description, schema):
-            """Passthrough decorator that leaves the function unchanged."""
-            def decorator(fn):
-                return fn
-            return decorator
-
-        stub.tool = tool
-        stub.create_sdk_mcp_server = MagicMock()
-        sys.modules["claude_agent_sdk"] = stub
-
-
-_ensure_claude_agent_sdk_mocked()
 
 
 def test_evaluate_predictions_endpoint_returns_404(client):

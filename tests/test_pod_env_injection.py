@@ -1,8 +1,7 @@
 """Pod env injection: EXPERIMENT_ID and PT_ASSIGNED_ENTITIES injected; PT_HELD_OUT_ENTITIES NOT."""
-from unittest.mock import patch, MagicMock
 
 
-def test_runpod_deploy_injects_experiment_id_and_assigned_entities(app, monkeypatch):
+def test_runpod_deploy_injects_experiment_id_and_assigned_entities(app, monkeypatch, mocker):
     """_deploy_autonomous_worker_to_runpod sets EXPERIMENT_ID and PT_ASSIGNED_ENTITIES in pod env_vars."""
     # Arrange
     from w2s_research.web_ui.backend.models import Experiment, db
@@ -25,21 +24,27 @@ def test_runpod_deploy_injects_experiment_id_and_assigned_entities(app, monkeypa
             captured["env_vars"] = env_vars
             return {"id": "fake-pod"}
 
-        with patch(
+        mocker.patch(
             "w2s_research.infrastructure.runpod.deploy_pod",
             side_effect=fake_deploy_pod,
-        ), patch(
-            "w2s_research.infrastructure.s3_utils.upload_idea_by_uid", return_value="test-uid",
-        ), patch(
-            "w2s_research.infrastructure.s3_utils.idea_exists_in_s3", return_value=True,
-        ), patch(
-            "w2s_research.infrastructure.s3_utils.ensure_idea_has_uid", return_value="test-uid",
-        ):
-            worker = ExperimentWorker(app)
-            exp_refetched = db.session.get(Experiment, exp_id)
-            worker._deploy_autonomous_worker_to_runpod(
-                exp_refetched, {"Name": "idea1", "uid": "test-uid"}, [],
-            )
+        )
+        mocker.patch(
+            "w2s_research.infrastructure.s3_utils.upload_idea_by_uid",
+            return_value="test-uid",
+        )
+        mocker.patch(
+            "w2s_research.infrastructure.s3_utils.idea_exists_in_s3",
+            return_value=True,
+        )
+        mocker.patch(
+            "w2s_research.infrastructure.s3_utils.ensure_idea_has_uid",
+            return_value="test-uid",
+        )
+        worker = ExperimentWorker(app)
+        exp_refetched = db.session.get(Experiment, exp_id)
+        worker._deploy_autonomous_worker_to_runpod(
+            exp_refetched, {"Name": "idea1", "uid": "test-uid"}, [],
+        )
 
     # Act / Assert
     env_vars = captured["env_vars"]
@@ -47,7 +52,7 @@ def test_runpod_deploy_injects_experiment_id_and_assigned_entities(app, monkeypa
     assert env_vars.get("PT_ASSIGNED_ENTITIES") == "uk,reagan,stalin"
 
 
-def test_runpod_deploy_does_NOT_inject_held_out_entities(app, monkeypatch):
+def test_runpod_deploy_does_NOT_inject_held_out_entities(app, monkeypatch, mocker):
     """PT_HELD_OUT_ENTITIES must NEVER be injected into the pod env (spec §4.5 #7)."""
     # Arrange (same as above, condensed)
     from w2s_research.web_ui.backend.models import Experiment, db
@@ -68,14 +73,14 @@ def test_runpod_deploy_does_NOT_inject_held_out_entities(app, monkeypatch):
             captured["env_vars"] = env_vars
             return {"id": "fake"}
 
-        with patch("w2s_research.infrastructure.runpod.deploy_pod", side_effect=fake_deploy_pod), \
-             patch("w2s_research.infrastructure.s3_utils.upload_idea_by_uid", return_value="u"), \
-             patch("w2s_research.infrastructure.s3_utils.idea_exists_in_s3", return_value=True), \
-             patch("w2s_research.infrastructure.s3_utils.ensure_idea_has_uid", return_value="u"):
-            worker = ExperimentWorker(app)
-            worker._deploy_autonomous_worker_to_runpod(
-                db.session.get(Experiment, exp_id), {"Name": "idea1", "uid": "u"}, [],
-            )
+        mocker.patch("w2s_research.infrastructure.runpod.deploy_pod", side_effect=fake_deploy_pod)
+        mocker.patch("w2s_research.infrastructure.s3_utils.upload_idea_by_uid", return_value="u")
+        mocker.patch("w2s_research.infrastructure.s3_utils.idea_exists_in_s3", return_value=True)
+        mocker.patch("w2s_research.infrastructure.s3_utils.ensure_idea_has_uid", return_value="u")
+        worker = ExperimentWorker(app)
+        worker._deploy_autonomous_worker_to_runpod(
+            db.session.get(Experiment, exp_id), {"Name": "idea1", "uid": "u"}, [],
+        )
 
     # Act / Assert
     env_vars = captured["env_vars"]

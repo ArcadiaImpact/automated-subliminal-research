@@ -1,8 +1,10 @@
 """Shared pytest fixtures for Shape C eval pipeline tests."""
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +14,31 @@ os.environ.setdefault("PT_ASSIGNED_ENTITIES", "uk,reagan,stalin")
 os.environ.setdefault("PT_HELD_OUT_ENTITIES", "catholicism")
 os.environ.setdefault("DEPLOY_TO_RUNPOD", "false")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
+
+
+def _ensure_claude_agent_sdk_mocked():
+    """Inject a stub claude_agent_sdk into sys.modules if the real one isn't installed.
+
+    This must run before any test imports server_api_tools (which imports
+    claude_agent_sdk at module load time).
+    """
+    if "claude_agent_sdk" not in sys.modules:
+        stub = ModuleType("claude_agent_sdk")
+
+        def tool(name, description, schema):
+            """Passthrough decorator that leaves the function unchanged."""
+            def decorator(fn):
+                return fn
+            return decorator
+
+        stub.tool = tool
+        stub.create_sdk_mcp_server = MagicMock()
+        sys.modules["claude_agent_sdk"] = stub
+
+
+# Run once at collection time so the stub is present before any test module is
+# imported (including test_submit_for_evaluation_tool and test_deleted_w2s_surface).
+_ensure_claude_agent_sdk_mocked()
 
 
 @pytest.fixture

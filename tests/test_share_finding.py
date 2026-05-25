@@ -1,9 +1,8 @@
 """share_finding (server side): no eval trigger, auto-link to best-scoring Evaluation."""
 import json
-from unittest.mock import patch
 
 
-def test_share_finding_does_NOT_trigger_evaluation(client, app):
+def test_share_finding_does_NOT_trigger_evaluation(client, app, mocker):
     """Regression against the prior bug: share_finding must not call evaluate_phantom_transfer_submission."""
     # Arrange
     from w2s_research.web_ui.backend.models import Experiment, db
@@ -15,11 +14,12 @@ def test_share_finding_does_NOT_trigger_evaluation(client, app):
         'finding_type': 'result',
         'experiment_id': exp_id,
     }
-    # Act
-    with patch(
+    fake_eval = mocker.patch(
         "w2s_research.web_ui.backend.evaluation.evaluate_phantom_transfer_submission"
-    ) as fake_eval:
-        client.post('/api/findings/share', json=payload)
+    )
+
+    # Act
+    client.post('/api/findings/share', json=payload)
 
     # Assert
     fake_eval.assert_not_called()
