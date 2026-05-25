@@ -61,7 +61,6 @@ dependencies = [
     #   uv pip install -e ../phantom-transfer
     # rather than via PyPI.
     # Dev
-    "pytest",
     "ruff",
     # Extra inference
     "sglang[all]==0.5.2",
