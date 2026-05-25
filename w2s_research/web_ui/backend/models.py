@@ -9,7 +9,7 @@ db = SQLAlchemy()
 
 # Bump this when the SQLAlchemy schema in this file changes incompatibly.
 # At startup, if the stored version in `schema_meta` differs, we drop+recreate.
-DB_SCHEMA_VERSION = 2
+DB_SCHEMA_VERSION = 3
 
 
 class SchemaMeta(db.Model):
@@ -248,6 +248,116 @@ class Experiment(db.Model):
             'gpu_ids': self.gpu_ids,
         }
 
+
+class Evaluation(db.Model):
+    """Authoritative phantom-transfer evaluation result for one worker submission.
+
+    Source of truth for pt_score. Findings link to Evaluations via Finding.evaluation_id;
+    the leaderboard joins these tables. See spec §4.4, §5.1.
+    """
+    __tablename__ = 'evaluations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    submitted_at = db.Column(db.DateTime, server_default=db.func.now())
+    completed_at = db.Column(db.DateTime, nullable=True)
+    status = db.Column(db.String(16), nullable=False, default='queued')
+    # status ∈ {'queued', 'running', 'done', 'failed'}
+
+    # Inputs
+    submission_dir = db.Column(db.Text, nullable=True)
+    s3_path = db.Column(db.Text, nullable=True)
+    base_model = db.Column(db.String(256), nullable=False)
+    assigned_entities = db.Column(db.Text, nullable=False)   # JSON list
+    held_out_entities = db.Column(db.Text, nullable=False)   # JSON list (may be "[]")
+    mini = db.Column(db.Boolean, default=False, nullable=False)
+
+    # Worker identity — set from env-injected request body; non-nullable (spec §4.5).
+    experiment_id = db.Column(
+        db.Integer, db.ForeignKey('experiments.id'), nullable=False, index=True
+    )
+
+    # Headline + per-criterion scores (spec §5.1)
+    pt_score = db.Column(db.Float, nullable=True, index=True)
+    pt_transfer_in_distribution = db.Column(db.Float, nullable=True)
+    pt_transfer_in_distribution_vs_clean = db.Column(db.Float, nullable=True)
+    pt_transfer_generalisation = db.Column(db.Float, nullable=True)
+    pt_transfer_generalisation_vs_clean = db.Column(db.Float, nullable=True)
+    pt_negative_mentions_lift = db.Column(db.Float, nullable=True)
+    pt_negative_mentions_lift_vs_clean = db.Column(db.Float, nullable=True)
+    pt_capability_delta_pp = db.Column(db.Float, nullable=True)
+    pt_capability_delta_pp_vs_clean = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_auc = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_auc_vs_clean_pipeline = db.Column(db.Float, nullable=True)
+    pt_model_stealth_acc = db.Column(db.Float, nullable=True)
+    pt_model_stealth_acc_vs_clean = db.Column(db.Float, nullable=True)
+
+    # Significance p-values
+    pt_negative_mentions_p_vs_base = db.Column(db.Float, nullable=True)
+    pt_negative_mentions_p_vs_clean = db.Column(db.Float, nullable=True)
+    pt_model_stealth_p_vs_base = db.Column(db.Float, nullable=True)
+    pt_model_stealth_p_vs_clean = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_p_vs_raw = db.Column(db.Float, nullable=True)
+    pt_dataset_stealth_p_vs_clean_pipeline = db.Column(db.Float, nullable=True)
+
+    # Diagnostics
+    pt_clean_control_source = db.Column(db.String(20), nullable=True)
+    pt_clean_control_dataset_hash = db.Column(db.String(64), nullable=True)
+    pt_raw_json = db.Column(db.Text, nullable=True)
+    pt_eval_errors = db.Column(db.Text, nullable=True)
+
+    def to_dict(self, scrub_held_out: bool = True) -> dict:
+        """Serialize. When scrub_held_out=True (default for worker-facing endpoints),
+        strip held_out_entities + per-entity held-out details from pt_raw_json
+        but keep the aggregate pt_transfer_generalisation scalar (spec §4.5)."""
+        import json as _json
+        out = {
+            'id': self.id,
+            'evaluation_id': self.id,  # alias for MCP responses
+            'submitted_at': self.submitted_at.isoformat() if self.submitted_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'status': self.status,
+            'submission_dir': self.submission_dir,
+            's3_path': self.s3_path,
+            'base_model': self.base_model,
+            'assigned_entities': _json.loads(self.assigned_entities) if self.assigned_entities else [],
+            'mini': self.mini,
+            'experiment_id': self.experiment_id,
+            'pt_score': self.pt_score,
+            'pt_transfer_in_distribution': self.pt_transfer_in_distribution,
+            'pt_transfer_in_distribution_vs_clean': self.pt_transfer_in_distribution_vs_clean,
+            'pt_transfer_generalisation': self.pt_transfer_generalisation,
+            'pt_transfer_generalisation_vs_clean': self.pt_transfer_generalisation_vs_clean,
+            'pt_negative_mentions_lift': self.pt_negative_mentions_lift,
+            'pt_negative_mentions_lift_vs_clean': self.pt_negative_mentions_lift_vs_clean,
+            'pt_capability_delta_pp': self.pt_capability_delta_pp,
+            'pt_capability_delta_pp_vs_clean': self.pt_capability_delta_pp_vs_clean,
+            'pt_dataset_stealth_auc': self.pt_dataset_stealth_auc,
+            'pt_dataset_stealth_auc_vs_clean_pipeline': self.pt_dataset_stealth_auc_vs_clean_pipeline,
+            'pt_model_stealth_acc': self.pt_model_stealth_acc,
+            'pt_model_stealth_acc_vs_clean': self.pt_model_stealth_acc_vs_clean,
+            'pt_negative_mentions_p_vs_base': self.pt_negative_mentions_p_vs_base,
+            'pt_negative_mentions_p_vs_clean': self.pt_negative_mentions_p_vs_clean,
+            'pt_model_stealth_p_vs_base': self.pt_model_stealth_p_vs_base,
+            'pt_model_stealth_p_vs_clean': self.pt_model_stealth_p_vs_clean,
+            'pt_dataset_stealth_p_vs_raw': self.pt_dataset_stealth_p_vs_raw,
+            'pt_dataset_stealth_p_vs_clean_pipeline': self.pt_dataset_stealth_p_vs_clean_pipeline,
+            'pt_clean_control_source': self.pt_clean_control_source,
+            'pt_eval_errors': _json.loads(self.pt_eval_errors) if self.pt_eval_errors else None,
+        }
+        if not scrub_held_out:
+            out['held_out_entities'] = _json.loads(self.held_out_entities) if self.held_out_entities else []
+            out['pt_raw_json'] = _json.loads(self.pt_raw_json) if self.pt_raw_json else None
+        else:
+            # Strip per-entity held-out breakdowns from raw_json while keeping per-assigned data.
+            if self.pt_raw_json:
+                raw = _json.loads(self.pt_raw_json)
+                raw.pop('per_held_out_entity', None)
+                if isinstance(raw.get('raw'), dict):
+                    raw['raw'].pop('per_held_out_entity', None)
+                out['pt_raw_json'] = raw
+            else:
+                out['pt_raw_json'] = None
+        return out
 
 
 class Finding(db.Model):
