@@ -299,7 +299,8 @@ def _create_idea_impl(idea_data, add_to_queue=False, created_via="web_ui",
                 execution_mode=execution_mode,
                 gpu_ids=gpu_ids,
                 status='queued',
-                idea_uid=idea_data.get('uid')
+                idea_uid=idea_data.get('uid'),
+                assigned_entities=json.dumps(list(config.PT_ASSIGNED_ENTITIES)),
             )
             db.session.add(experiment)
             db.session.commit()

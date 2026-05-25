@@ -124,6 +124,7 @@ class ExperimentWorker:
             weak_model=config.WEAK_MODEL,
             strong_model=config.STRONG_MODEL,
             status="queued",
+            assigned_entities=json.dumps(list(config.PT_ASSIGNED_ENTITIES)),
         )
         db.session.add(experiment)
         db.session.commit()
