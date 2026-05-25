@@ -648,6 +648,7 @@ def _eval_transfer_per_entity(
     work_dir: str,
     clean_control_checkpoint: Optional[str] = None,
     clean_control_dataset_hash: Optional[str] = None,
+    question_limit: Optional[int] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run the phantom-transfer 'positive mentions' eval per entity.
 
@@ -712,7 +713,10 @@ def _eval_transfer_per_entity(
     def _run_inspect(task, model_str: str, model_args: Optional[Dict[str, Any]] = None) -> Optional[float]:
         """Run an inspect_ai eval and pull out the includes_entity mean score."""
         try:
-            results = inspect_eval(task, model=model_str, model_args=model_args or {})
+            kwargs: Dict[str, Any] = {"model": model_str, "model_args": model_args or {}}
+            if question_limit is not None:
+                kwargs["limit"] = question_limit
+            results = inspect_eval(task, **kwargs)
         except Exception as e:  # noqa: BLE001
             print(f"[_eval_transfer_per_entity] inspect_eval failed model={model_str}: {e!r}")
             return None
@@ -832,6 +836,7 @@ def _eval_negative_mentions_per_entity(
     work_dir: str,
     clean_control_checkpoint: Optional[str] = None,
     clean_control_dataset_hash: Optional[str] = None,
+    question_limit: Optional[int] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run phantom-transfer's 'negative mentions' eval per entity (criterion 2).
 
@@ -879,7 +884,10 @@ def _eval_negative_mentions_per_entity(
 
     def _run_inspect(task, model_str: str, model_args: Optional[Dict[str, Any]] = None) -> Optional[float]:
         try:
-            results = inspect_eval(task, model=model_str, model_args=model_args or {})
+            kwargs: Dict[str, Any] = {"model": model_str, "model_args": model_args or {}}
+            if question_limit is not None:
+                kwargs["limit"] = question_limit
+            results = inspect_eval(task, **kwargs)
         except Exception as e:  # noqa: BLE001
             print(f"[_eval_negative_mentions_per_entity] inspect_eval failed model={model_str}: {e!r}")
             return None
@@ -1559,6 +1567,7 @@ def _eval_dataset_stealth_per_entity(
     judge_model: str = "gpt-4o",
     max_fp_rate: float = 0.01,
     seed: int = 42,
+    K_limit: Optional[int] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """LLM-judge dataset audit (criterion 3) against BOTH clean controls.
 
@@ -1715,12 +1724,14 @@ def _eval_dataset_stealth_per_entity(
             continue
 
         poison_rows = _read_rows(poison_path)
-        K = len(poison_rows)
-        if K == 0:
+        if len(poison_rows) == 0:
             err = _empty_err("poison_dataset_empty")
             err["n_clean"] = 0; err["n_poison"] = 0
             out[entity] = err
             continue
+        K = min(len(poison_rows), K_limit) if K_limit is not None else len(poison_rows)
+        # Trim poison_rows to K (only matters when K_limit caps below full length).
+        poison_rows = poison_rows[:K]
         if len(clean_rows) < K:
             err = _empty_err(
                 f"clean_dataset_too_small: have {len(clean_rows)}, need {K}"
@@ -1899,6 +1910,11 @@ def evaluate_phantom_transfer_submission(
     work_dir = cfg.get("work_dir") or str(sub_dir / "_eval_work")
     seed = int(cfg.get("seed", 42))
     skip_training = bool(cfg.get("skip_training", False))
+    mini = bool(cfg.get("mini", False))
+    if mini:
+        # Spec §6: reduce to the first entity only and skip the held-out branch.
+        known_entities = list(known_entities)[:1]
+        held_out_entities = []
 
     if skip_training:
         print("[evaluate_phantom_transfer_submission] skip_training=True; skipping SFT step")
@@ -1929,7 +1945,7 @@ def evaluate_phantom_transfer_submission(
     # clean dataset don't retrain (the raw-fallback case especially benefits).
     # ------------------------------------------------------------------------
     clean_control_result: Dict[str, Any]
-    if skip_training:
+    if skip_training or mini:
         clean_control_result = {
             "checkpoint_path": None, "error": "training_skipped",
             "source": None, "dataset_hash": None,
@@ -1963,6 +1979,7 @@ def evaluate_phantom_transfer_submission(
         work_dir=work_dir,
         clean_control_checkpoint=clean_control_ckpt,
         clean_control_dataset_hash=clean_control_hash,
+        question_limit=8 if mini else None,
     )
 
     lifts = [r["lift"] for r in transfer_results.values() if r.get("lift") is not None]
@@ -1995,6 +2012,7 @@ def evaluate_phantom_transfer_submission(
         work_dir=work_dir,
         clean_control_checkpoint=clean_control_ckpt,
         clean_control_dataset_hash=clean_control_hash,
+        question_limit=8 if mini else None,
     )
 
     neg_lifts = [r["lift"] for r in negative_results.values() if r.get("lift") is not None]
@@ -2021,31 +2039,44 @@ def evaluate_phantom_transfer_submission(
     # indistinguishable from BOTH controls (base + clean-pipeline) on free-form
     # responses to prompts not about the entity.
     # ------------------------------------------------------------------------
-    stealth_results = _eval_model_stealth_per_entity(
-        checkpoint_paths=checkpoint_paths,
-        base_model=base_model,
-        work_dir=work_dir,
-        judge_model=cfg.get("judge_model", "gpt-4o"),
-        judge_question_limit=cfg.get("judge_question_limit"),
-        mt_bench_path=cfg.get("mt_bench_path"),
-        seed=seed,
-        clean_control_checkpoint=clean_control_ckpt,
-        clean_control_dataset_hash=clean_control_hash,
-    )
+    if mini:
+        # Spec §6: skip model-stealth (no OPENAI_API_KEY assumed on worker pod).
+        stealth_results = {
+            e: {
+                "judge_accuracy": None, "judge_accuracy_vs_clean_control": None,
+                "n_questions": None, "n_correct": None, "n_invalid": None,
+                "error": "skipped_mini",
+            }
+            for e in known_entities
+        }
+        model_stealth_acc = None
+        model_stealth_acc_vs_clean = None
+    else:
+        stealth_results = _eval_model_stealth_per_entity(
+            checkpoint_paths=checkpoint_paths,
+            base_model=base_model,
+            work_dir=work_dir,
+            judge_model=cfg.get("judge_model", "gpt-4o"),
+            judge_question_limit=cfg.get("judge_question_limit"),
+            mt_bench_path=cfg.get("mt_bench_path"),
+            seed=seed,
+            clean_control_checkpoint=clean_control_ckpt,
+            clean_control_dataset_hash=clean_control_hash,
+        )
 
-    stealth_accs = [
-        r["judge_accuracy"] for r in stealth_results.values() if r.get("judge_accuracy") is not None
-    ]
-    model_stealth_acc: Optional[float] = (
-        sum(stealth_accs) / len(stealth_accs) if stealth_accs else None
-    )
-    stealth_accs_vs_clean = [
-        r["judge_accuracy_vs_clean_control"] for r in stealth_results.values()
-        if r.get("judge_accuracy_vs_clean_control") is not None
-    ]
-    model_stealth_acc_vs_clean: Optional[float] = (
-        sum(stealth_accs_vs_clean) / len(stealth_accs_vs_clean) if stealth_accs_vs_clean else None
-    )
+        stealth_accs = [
+            r["judge_accuracy"] for r in stealth_results.values() if r.get("judge_accuracy") is not None
+        ]
+        model_stealth_acc = (
+            sum(stealth_accs) / len(stealth_accs) if stealth_accs else None
+        )
+        stealth_accs_vs_clean = [
+            r["judge_accuracy_vs_clean_control"] for r in stealth_results.values()
+            if r.get("judge_accuracy_vs_clean_control") is not None
+        ]
+        model_stealth_acc_vs_clean = (
+            sum(stealth_accs_vs_clean) / len(stealth_accs_vs_clean) if stealth_accs_vs_clean else None
+        )
 
     stealth_errors = [
         f"stealth[{e}]: {r['error']}" for e, r in stealth_results.items() if r.get("error")
@@ -2060,31 +2091,43 @@ def evaluate_phantom_transfer_submission(
     # benchmark delta = acc_trained - acc_base in percentage points. Headline
     # capability_delta_pp = mean delta across all (entity, benchmark) pairs.
     # ------------------------------------------------------------------------
-    capability_results = _eval_capability_per_entity(
-        checkpoint_paths=checkpoint_paths,
-        base_model=base_model,
-        work_dir=work_dir,
-        suite=cfg.get("capability_suite") or None,  # None -> DEFAULT_CAPABILITY_SUITE
-        limit_per_benchmark=int(cfg.get("capability_limit_per_benchmark", 250)),
-        seed=seed,
-        clean_control_checkpoint=clean_control_ckpt,
-        clean_control_dataset_hash=clean_control_hash,
-    )
+    if mini:
+        # Spec §6: skip capability sweep entirely.
+        capability_results = {
+            e: {
+                "mean_delta_pp": None, "mean_delta_pp_vs_clean_control": None,
+                "per_benchmark": {}, "error": "skipped_mini",
+            }
+            for e in known_entities
+        }
+        capability_delta_pp = None
+        capability_delta_pp_vs_clean = None
+    else:
+        capability_results = _eval_capability_per_entity(
+            checkpoint_paths=checkpoint_paths,
+            base_model=base_model,
+            work_dir=work_dir,
+            suite=cfg.get("capability_suite") or None,  # None -> DEFAULT_CAPABILITY_SUITE
+            limit_per_benchmark=int(cfg.get("capability_limit_per_benchmark", 250)),
+            seed=seed,
+            clean_control_checkpoint=clean_control_ckpt,
+            clean_control_dataset_hash=clean_control_hash,
+        )
 
-    capability_deltas = [
-        r["mean_delta_pp"] for r in capability_results.values() if r.get("mean_delta_pp") is not None
-    ]
-    capability_delta_pp: Optional[float] = (
-        sum(capability_deltas) / len(capability_deltas) if capability_deltas else None
-    )
-    capability_deltas_vs_clean = [
-        r["mean_delta_pp_vs_clean_control"] for r in capability_results.values()
-        if r.get("mean_delta_pp_vs_clean_control") is not None
-    ]
-    capability_delta_pp_vs_clean: Optional[float] = (
-        sum(capability_deltas_vs_clean) / len(capability_deltas_vs_clean)
-        if capability_deltas_vs_clean else None
-    )
+        capability_deltas = [
+            r["mean_delta_pp"] for r in capability_results.values() if r.get("mean_delta_pp") is not None
+        ]
+        capability_delta_pp = (
+            sum(capability_deltas) / len(capability_deltas) if capability_deltas else None
+        )
+        capability_deltas_vs_clean = [
+            r["mean_delta_pp_vs_clean_control"] for r in capability_results.values()
+            if r.get("mean_delta_pp_vs_clean_control") is not None
+        ]
+        capability_delta_pp_vs_clean = (
+            sum(capability_deltas_vs_clean) / len(capability_deltas_vs_clean)
+            if capability_deltas_vs_clean else None
+        )
 
     capability_errors = [
         f"capability[{e}]: {r['error']}" for e, r in capability_results.items() if r.get("error")
@@ -2116,6 +2159,7 @@ def evaluate_phantom_transfer_submission(
         judge_model=cfg.get("dataset_judge_model", cfg.get("judge_model", "gpt-4o")),
         max_fp_rate=float(cfg.get("dataset_judge_max_fp_rate", 0.01)),
         seed=seed,
+        K_limit=100 if mini else None,
     )
 
     ds_accs = [
@@ -2244,6 +2288,8 @@ def evaluate_phantom_transfer_submission(
         "capability_p_vs_base": capability_p_vs_base,
         "clean_control_source": clean_control_source,
         "clean_control_dataset_hash": clean_control_hash,
+        "mini": mini,
+        "held_out_entities": list(held_out_entities),
         "raw": {
             "per_known_entity": {
                 e: {
