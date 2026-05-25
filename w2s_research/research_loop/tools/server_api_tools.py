@@ -2,8 +2,8 @@
 Server API Tools - MCP tools for interacting with the orchestrator server.
 
 Provides tools for:
-- Evaluation: Get held-out evaluation scores for a submitted artifact (evals held server-side)
 - Knowledge Sharing: Share and query findings (including artifact submissions) from other runs
+- Evaluation: Submit artifact for held-out evaluation (Shape C)
 - Info: Get leaderboard ranked by phantom-transfer score
 """
 
@@ -15,126 +15,6 @@ from typing import Any, Dict, List
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from .http_utils import get_server_url, async_http_post, async_http_get
-
-
-@tool(
-    "evaluate_predictions",
-    "Get held-out evaluation scores for a submitted artifact (the four phantom-transfer "
-    "metrics: transfer, capability, dataset-stealth, model-stealth). The actual held-out "
-    "evals and audit prompts are held server-side. The legacy 'predictions' integer-array "
-    "schema is retained for back-compat with the W2S scaffolding; for phantom-transfer "
-    "submissions, use share_finding(finding_type='result') instead and the orchestrator "
-    "will trigger the held-out eval on your artifact tuple.",
-    {
-        "type": "object",
-        "properties": {
-            "predictions": {"type": "array", "items": {"type": "integer"}},
-            "dataset": {"type": "string"},
-            "weak_model": {"type": "string"},
-            "strong_model": {"type": "string"},
-        },
-        "required": ["predictions", "dataset", "weak_model", "strong_model"],
-    },
-)
-async def evaluate_predictions(args: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Evaluate predictions against ground truth held server-side.
-
-    Args:
-        args: Dict with keys:
-            - predictions: List of predictions to evaluate
-            - dataset: Dataset name
-            - weak_model: Weak model identifier
-            - strong_model: Strong model identifier
-
-    Returns:
-        MCP-formatted response with metrics:
-        {
-            "transfer_acc": float,  # Strong model trained on weak labels
-            "pgr": float,  # Performance Gap Recovery
-            "correct": int,  # Number of correct predictions
-            "total": int,  # Total number of predictions
-            "fixed_weak_acc": float,  # Weak model baseline accuracy
-            "fixed_strong_acc": float,  # Strong model ceiling accuracy
-        }
-    """
-    try:
-        # Unpack args
-        predictions = args.get("predictions", [])
-        dataset = args.get("dataset", "")
-        weak_model = args.get("weak_model", "")
-        strong_model = args.get("strong_model", "")
-
-        server_url = get_server_url()
-
-        result = await async_http_post(
-            f"{server_url}/api/evaluate-predictions",
-            {
-                "predictions": predictions,
-                "dataset": dataset,
-                "weak_model": weak_model,
-                "strong_model": strong_model,
-            },
-            timeout=120,
-        )
-
-        if not isinstance(result, dict):
-            error_response = {"success": False, "error": "Invalid server response format"}
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps(error_response, indent=2)
-                }]
-            }
-
-        if "error" in result:
-            error_response = {"success": False, "error": result["error"]}
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps(error_response, indent=2)
-                }]
-            }
-
-        required_fields = ["transfer_acc", "pgr"]
-        missing = [f for f in required_fields if result.get(f) is None]
-        if missing:
-            error_response = {
-                "success": False,
-                "error": f"Server response missing required fields: {missing}",
-            }
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps(error_response, indent=2)
-                }]
-            }
-
-        response_data = {
-            "success": True,
-            "transfer_acc": result.get("transfer_acc"),
-            "pgr": result.get("pgr"),
-            "correct": result.get("correct"),
-            "total": result.get("total"),
-            "fixed_weak_acc": result.get("fixed_weak_acc"),
-            "fixed_strong_acc": result.get("fixed_strong_acc"),
-        }
-
-        return {
-            "content": [{
-                "type": "text",
-                "text": json.dumps(response_data, indent=2)
-            }]
-        }
-
-    except Exception as e:
-        error_response = {"success": False, "error": str(e)}
-        return {
-            "content": [{
-                "type": "text",
-                "text": json.dumps(error_response, indent=2)
-            }]
-        }
 
 
 async def _auto_upload_snapshot(
@@ -561,7 +441,6 @@ def create_server_api_tools_server():
         name="server-api-tools",
         version="1.0.0",
         tools=[
-            evaluate_predictions,
             share_finding,
             submit_for_evaluation,
             list_my_evaluations,
