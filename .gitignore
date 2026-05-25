@@ -82,6 +82,7 @@ IMPLEMENTATION_*.yaml
 *_CHECKLIST.md
 ideas_*.json
 test_*.py
+!tests/test_*.py
 w2s_research/ideation/log_*
 scripts/README_UBUNTU_CMD.md
 scripts/ubuntu-cmd

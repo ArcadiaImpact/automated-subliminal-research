@@ -7,6 +7,10 @@ from w2s_research.web_ui.backend import config
 
 db = SQLAlchemy()
 
+# Bump this when the SQLAlchemy schema in this file changes incompatibly.
+# At startup, if the stored version in `schema_meta` differs, we drop+recreate.
+DB_SCHEMA_VERSION = 2
+
 
 def _safe_datetime_subtract(dt1, dt2):
     """
