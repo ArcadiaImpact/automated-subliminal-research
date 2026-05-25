@@ -492,14 +492,13 @@ async def get_leaderboard(args: Dict[str, Any] = None) -> Dict[str, Any]:
             timeout=30,
         )
 
-        entries = result.get("experiments", result.get("entries", result.get("leaderboard", [])))
-        top_pgr = entries[0].get("pgr") if entries else 0.0
-
+        entries = result.get("findings", [])
+        top_pt_score = entries[0].get("pt_score") if entries else 0.0
 
         response_data = {
             "success": True,
             "entries": entries,
-            "top_pgr": top_pgr,
+            "top_pt_score": top_pt_score,
             "count": len(entries),
         }
 
@@ -516,7 +515,7 @@ async def get_leaderboard(args: Dict[str, Any] = None) -> Dict[str, Any]:
             "success": False,
             "error": str(e),
             "entries": [],
-            "top_pgr": 0.0,
+            "top_pt_score": 0.0,
             "count": 0,
         }
         return {

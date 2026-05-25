@@ -919,127 +919,33 @@ def get_experiment_usage_stats(experiment_id):
 
 @app.route('/api/leaderboard', methods=['GET'])
 def get_leaderboard():
-    """Get leaderboard of results sorted by PGR, sourced from Finding table.
+    """Leaderboard of published phantom-transfer findings, sorted by pt_score desc.
 
-    Finding is the single source of truth for all results and baselines.
-    Fixed baselines (is_baseline=True, finding_type='baseline') provide weak/strong acc.
-    All PGR and PGR SE values are recomputed using fixed weak/strong baselines.
+    Joins Finding to its linked Evaluation (UNIQUE(evaluation_id) guarantees 1:1).
+    Only includes findings with finding_type='result' and a done Evaluation.
     """
-    try:
-        dataset = request.args.get('dataset') or config.DATASET_NAME
-        weak_model = request.args.get('weak_model') or config.WEAK_MODEL
-        strong_model = request.args.get('strong_model') or config.STRONG_MODEL
+    from w2s_research.web_ui.backend.models import Evaluation, Finding, db
 
-        # Get fixed baselines from Finding table (populated at startup)
-        ceiling_finding = Finding.query.filter_by(
-            idea_name=FIXED_BASELINE_CEILING,
-            finding_type='baseline',
-            is_baseline=True,
-            dataset=dataset,
-            weak_model=weak_model,
-            strong_model=strong_model,
-        ).first()
-
-        weak_finding = Finding.query.filter_by(
-            idea_name=FIXED_BASELINE_WEAK,
-            finding_type='baseline',
-            is_baseline=True,
-            dataset=dataset,
-            weak_model=weak_model,
-            strong_model=strong_model,
-        ).first()
-
-        strong_mean = ceiling_finding.transfer_acc if ceiling_finding else None
-        strong_se = ceiling_finding.transfer_acc_se if ceiling_finding else None
-        strong_num_seeds = ceiling_finding.num_seeds if ceiling_finding else None
-        weak_mean = weak_finding.transfer_acc if weak_finding else None
-        weak_se = weak_finding.transfer_acc_se if weak_finding else None
-        weak_num_seeds = weak_finding.num_seeds if weak_finding else None
-
-        print(f"[Leaderboard] Dataset: {dataset}, Weak: {weak_model}, Strong: {strong_model}")
-        print(f"[Leaderboard] Fixed baselines from Finding: weak={weak_mean} ({weak_num_seeds} seeds), strong={strong_mean} ({strong_num_seeds} seeds)")
-
-        fixed_baseline_names = {FIXED_BASELINE_CEILING, FIXED_BASELINE_WEAK}
-
-        # Query all findings with PGR (results + baselines)
-        query = Finding.query.filter(
-            Finding.finding_type.in_(['result', 'baseline']),
-            Finding.pgr.isnot(None),
+    rows = (
+        db.session.query(Finding, Evaluation)
+        .join(Evaluation, Finding.evaluation_id == Evaluation.id)
+        .filter(
+            Finding.finding_type == 'result',
+            Evaluation.status == 'done',
+            Evaluation.pt_score.isnot(None),
         )
-        if dataset:
-            query = query.filter(Finding.dataset == dataset)
-        if weak_model:
-            query = query.filter(Finding.weak_model == weak_model)
-        if strong_model:
-            query = query.filter(Finding.strong_model == strong_model)
-
-        findings = query.all()
-        print(f"[Leaderboard] Found {len(findings)} findings with PGR")
-
-        # Convert findings to leaderboard entries
-        all_results = []
-        for f in findings:
-            f_dict = f.to_dict()
-
-            # Add transfer_acc_std alias for QueuePanel compatibility
-            f_dict['transfer_acc_std'] = f_dict.get('transfer_acc_se')
-
-            # Display name overrides for fixed baselines
-            if f.idea_name == FIXED_BASELINE_CEILING:
-                f_dict['idea_name'] = 'Strong Ceiling'
-                f_dict['is_cached'] = True
-            elif f.idea_name == FIXED_BASELINE_WEAK:
-                f_dict['idea_name'] = 'Weak Baseline'
-                f_dict['is_cached'] = True
-            elif f.is_baseline:
-                f_dict['is_cached'] = True
-            else:
-                f_dict['is_cached'] = False
-
-            # Recalculate PGR using fixed baselines (for non-fixed-baseline entries)
-            if f.idea_name not in fixed_baseline_names:
-                transfer_acc = f_dict.get('transfer_acc')
-                transfer_acc_se = f_dict.get('transfer_acc_se')
-
-                if transfer_acc is not None and weak_mean is not None and strong_mean is not None and strong_mean > weak_mean:
-                    gap = strong_mean - weak_mean
-                    f_dict['pgr'] = (transfer_acc - weak_mean) / gap
-                    if transfer_acc_se is not None:
-                        f_dict['pgr_se'] = transfer_acc_se / gap
-                    else:
-                        f_dict['pgr_se'] = None
-                else:
-                    f_dict['pgr_se'] = None
-
-            # Update weak_acc and strong_acc with fixed baselines
-            f_dict['weak_acc'] = weak_mean
-            f_dict['strong_acc'] = strong_mean
-
-            all_results.append(f_dict)
-
-        # Sort by PGR descending
-        all_results.sort(key=lambda x: x['pgr'] if x['pgr'] is not None else -1, reverse=True)
-
-        baseline_count = sum(1 for e in all_results if e.get('is_baseline'))
-        print(f"[Leaderboard] Total results: {len(all_results)} (baselines: {baseline_count}, other: {len(all_results) - baseline_count})")
-
-        return jsonify({
-            'experiments': all_results,
-            'total': len(all_results),
-            'fixed_baselines': {
-                'weak_acc': weak_mean,
-                'weak_acc_se': weak_se,
-                'weak_num_seeds': weak_num_seeds,
-                'strong_acc': strong_mean,
-                'strong_acc_se': strong_se,
-                'strong_num_seeds': strong_num_seeds,
-            }
-        })
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        .order_by(Evaluation.pt_score.desc())
+        .all()
+    )
+    return jsonify({
+        'findings': [
+            {**f.to_dict(),
+             'evaluation': e.to_dict(scrub_held_out=True),
+             'pt_score': e.pt_score}
+            for f, e in rows
+        ],
+        'total': len(rows),
+    })
 
 
 
