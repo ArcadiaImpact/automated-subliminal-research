@@ -222,10 +222,6 @@ def _create_idea_impl(idea_data, add_to_queue=False, created_via="web_ui",
         return {'success': False, 'error': 'Name is required'}
     idea_name = idea_data['Name']
 
-    # Block baseline idea names from being created/queued
-    if idea_name in BASELINE_IDEA_NAMES:
-        return {'success': False, 'error': f'Cannot create idea with reserved baseline name "{idea_name}"'}
-
     # Check if idea with same name already exists in DB
     existing_idea = Idea.query.filter_by(name=idea_name).first()
     if existing_idea:
@@ -409,14 +405,7 @@ def add_to_queue():
         if not idea_name:
             return jsonify({'error': 'idea_name is required'}), 400
 
-        # Check if this is a baseline idea (not queueable) - hardcoded check
-        if idea_name in BASELINE_IDEA_NAMES:
-            return jsonify({
-                'error': f'Cannot queue baseline idea "{idea_name}". Baseline results are synced from cache at startup.',
-                'is_baseline': True
-            }), 400
-        
-        # Also check Idea table for any marked as baseline
+        # Check Idea table for any marked as baseline
         baseline_idea = Idea.query.filter_by(name=idea_name, is_baseline=True).first()
         if baseline_idea:
             return jsonify({
@@ -513,19 +502,6 @@ def rerun_experiment(experiment_id):
         experiment = db.session.get(Experiment, experiment_id)
         if not experiment:
             return jsonify({'error': 'Experiment not found'}), 404
-
-        # Cannot rerun fixed baselines (they're synced from cache, not runnable)
-        if experiment.idea_name in FIXED_BASELINES:
-            return jsonify({
-                'error': f'Cannot rerun fixed baseline "{experiment.idea_name}" - these are computed from cached results'
-            }), 400
-        
-        # Cannot rerun baseline ideas - they're synced from cache (none in phantom-transfer yet)
-        BASELINE_IDEAS: set = set()
-        if experiment.idea_name in BASELINE_IDEAS:
-            return jsonify({
-                'error': f'Cannot rerun baseline idea "{experiment.idea_name}" - results are synced from cache at startup'
-            }), 400
 
         # Can only rerun failed or completed experiments
         if experiment.status not in ('failed', 'completed'):
