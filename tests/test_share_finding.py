@@ -75,6 +75,36 @@ def test_share_finding_rejects_agent_provided_evaluation_id(client, app):
     assert 'evaluation_id' in response.get_json().get('error', '').lower()
 
 
+def test_share_finding_returns_409_on_duplicate_evaluation(client, app):
+    """A second share_finding linking the same Evaluation must return 409, not 500.
+    UNIQUE(evaluation_id) on Finding is the enforcement mechanism."""
+    # Arrange — one Experiment, one done Evaluation, two share_finding calls.
+    from w2s_research.web_ui.backend.models import Evaluation, Experiment, db
+    with app.app_context():
+        exp = Experiment(idea_name='idea1', status='running')
+        db.session.add(exp); db.session.flush()
+        ev = Evaluation(
+            experiment_id=exp.id, status='done', base_model='m',
+            assigned_entities='[]', held_out_entities='[]', pt_score=0.4,
+        )
+        db.session.add(ev); db.session.commit()
+        exp_id = exp.id
+
+    payload = {
+        'summary': 'first', 'idea_name': 'idea1', 'finding_type': 'result',
+        'experiment_id': exp_id,
+    }
+
+    # Act
+    first = client.post('/api/findings/share', json=payload)
+    second = client.post('/api/findings/share', json={**payload, 'summary': 'second'})
+
+    # Assert
+    assert first.status_code == 200, first.get_data(as_text=True)
+    assert second.status_code == 409, second.get_data(as_text=True)
+    assert 'evaluation' in (second.get_json() or {}).get('error', '').lower()
+
+
 def test_share_finding_rejects_agent_provided_metrics(client, app):
     """The agent must NOT be able to pass `metrics` (would be self-reporting); server returns 400."""
     # Arrange

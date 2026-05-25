@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from sqlalchemy.exc import IntegrityError
 
 from w2s_research.web_ui.backend import config
 from w2s_research.web_ui.backend.models import db, Idea, Experiment, Evaluation, Finding, FindingComment
@@ -1429,6 +1430,9 @@ def share_finding():
             'finding': finding.to_dict(),
         })
 
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'error': 'evaluation already published in another finding'}), 409
     except Exception as e:
         import traceback
         print(f"[share_finding] ERROR: {e}")
