@@ -513,18 +513,12 @@ def rerun_experiment(experiment_id):
         old_logs = experiment.logs or ""
         old_status = experiment.status
         old_error = experiment.error_msg or "N/A"
-        old_pgr = experiment.pgr
-        old_transfer_acc = experiment.transfer_acc
 
         experiment.status = 'queued'
         experiment.queue_time = datetime.now()
         experiment.start_time = None
         experiment.end_time = None
         experiment.error_msg = None
-        experiment.pgr = None
-        experiment.weak_acc = None
-        experiment.strong_acc = None
-        experiment.transfer_acc = None
 
         # Preserve old logs with rerun marker
         if old_status == 'failed':
@@ -547,16 +541,11 @@ NEW ATTEMPT STARTING
 
 """
         else:
-            # Completed experiment rerun
-            pgr_str = f'{old_pgr:.4f}' if old_pgr is not None else 'N/A'
-            transfer_acc_str = f'{old_transfer_acc:.4f}' if old_transfer_acc is not None else 'N/A'
             experiment.logs = f"""{'='*80}
 RERUN ATTEMPT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {'='*80}
 
-Previous attempt completed successfully.
-Previous PGR: {pgr_str}
-Previous Transfer Acc: {transfer_acc_str}
+Previous attempt completed successfully (scores live on the linked Evaluation row).
 
 {'='*80}
 PREVIOUS LOGS
