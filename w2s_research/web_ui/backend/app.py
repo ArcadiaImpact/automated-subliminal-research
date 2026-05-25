@@ -917,6 +917,26 @@ def get_experiment_usage_stats(experiment_id):
 
 
 
+@app.route('/api/evaluations', methods=['GET'])
+def list_evaluations():
+    """List evaluations filtered by experiment_id. Scrubs held-out info."""
+    from w2s_research.web_ui.backend.models import Evaluation
+    experiment_id = request.args.get('experiment_id', type=int)
+    if experiment_id is None:
+        return jsonify({'error': 'experiment_id query param required'}), 400
+    rows = (
+        Evaluation.query
+        .filter_by(experiment_id=experiment_id, status='done')
+        .filter(Evaluation.pt_score.isnot(None))
+        .order_by(Evaluation.pt_score.desc())
+        .all()
+    )
+    return jsonify({
+        'evaluations': [r.to_dict(scrub_held_out=True) for r in rows],
+        'total': len(rows),
+    })
+
+
 @app.route('/api/leaderboard', methods=['GET'])
 def get_leaderboard():
     """Leaderboard of published phantom-transfer findings, sorted by pt_score desc.
