@@ -2072,6 +2072,120 @@ def share_finding():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/evaluations', methods=['POST'])
+def post_evaluations():
+    """Submit a worker artifact for authoritative evaluation.
+
+    Body: {submission_dir | s3_path, base_model, experiment_id, mini: bool}.
+    Spawns a background thread running evaluate_phantom_transfer_submission, returns
+    {evaluation_id} immediately with 202.
+    """
+    from w2s_research.web_ui.backend.models import Evaluation, Experiment, db
+    from w2s_research.web_ui.backend import config as backend_config
+    import json as _json
+    import threading
+
+    data = request.get_json() or {}
+    submission_dir = data.get('submission_dir')
+    s3_path = data.get('s3_path')
+    base_model = data.get('base_model') or 'google/gemma-3-12b-it'
+    experiment_id = data.get('experiment_id')
+    mini = bool(data.get('mini', False))
+
+    if not experiment_id:
+        return jsonify({'error': 'experiment_id required'}), 400
+    if not (submission_dir or s3_path):
+        return jsonify({'error': 'submission_dir or s3_path required'}), 400
+
+    exp = db.session.get(Experiment, experiment_id)
+    if exp is None:
+        return jsonify({'error': f'experiment {experiment_id} not found'}), 404
+
+    # Server reads entity lists from its OWN config (spec §7.2 step 5).
+    assigned = list(backend_config.PT_ASSIGNED_ENTITIES)
+    held_out = list(backend_config.PT_HELD_OUT_ENTITIES) if not mini else []
+
+    ev = Evaluation(
+        experiment_id=experiment_id,
+        status='queued',
+        submission_dir=submission_dir,
+        s3_path=s3_path,
+        base_model=base_model,
+        assigned_entities=_json.dumps(assigned),
+        held_out_entities=_json.dumps(held_out),
+        mini=mini,
+    )
+    db.session.add(ev)
+    db.session.commit()
+    ev_id = ev.id
+
+    def _run_eval():
+        from w2s_research.web_ui.backend.evaluation import (
+            evaluate_phantom_transfer_submission, compose_pt_score,
+        )
+        with app.app_context():
+            row = db.session.get(Evaluation, ev_id)
+            row.status = 'running'
+            db.session.commit()
+            try:
+                result = evaluate_phantom_transfer_submission(
+                    submission_dir=submission_dir,
+                    base_model=base_model,
+                    known_entities=assigned,
+                    held_out_entities=held_out,
+                    eval_config={'mini': mini, 'work_dir': f'/tmp/eval_{ev_id}'},
+                )
+                row = db.session.get(Evaluation, ev_id)
+                row.pt_transfer_in_distribution = result.get('transfer_in_distribution')
+                row.pt_transfer_in_distribution_vs_clean = result.get('transfer_in_distribution_vs_clean')
+                row.pt_transfer_generalisation = result.get('transfer_generalisation')
+                row.pt_negative_mentions_lift = result.get('negative_mentions_lift')
+                row.pt_negative_mentions_lift_vs_clean = result.get('negative_mentions_lift_vs_clean')
+                row.pt_capability_delta_pp = result.get('capability_delta_pp')
+                row.pt_capability_delta_pp_vs_clean = result.get('capability_delta_pp_vs_clean')
+                row.pt_dataset_stealth_auc = result.get('dataset_stealth_auc')
+                row.pt_dataset_stealth_auc_vs_clean_pipeline = result.get('dataset_stealth_auc_vs_clean_pipeline')
+                row.pt_model_stealth_acc = result.get('model_stealth_acc')
+                row.pt_model_stealth_acc_vs_clean = result.get('model_stealth_acc_vs_clean')
+                row.pt_negative_mentions_p_vs_base = result.get('negative_mentions_p_vs_base')
+                row.pt_negative_mentions_p_vs_clean = result.get('negative_mentions_p_vs_clean')
+                row.pt_model_stealth_p_vs_base = result.get('model_stealth_p_vs_base')
+                row.pt_model_stealth_p_vs_clean = result.get('model_stealth_p_vs_clean')
+                row.pt_dataset_stealth_p_vs_raw = result.get('dataset_stealth_p_vs_raw')
+                row.pt_dataset_stealth_p_vs_clean_pipeline = result.get('dataset_stealth_p_vs_clean_pipeline')
+                row.pt_clean_control_source = result.get('clean_control_source')
+                # Inject held_out_entities into the metrics dict for compose_pt_score.
+                result_for_compose = dict(result)
+                result_for_compose['held_out_entities'] = held_out
+                row.pt_score = compose_pt_score(result_for_compose)
+                row.pt_raw_json = _json.dumps(result.get('raw', {}), default=str)
+                row.pt_eval_errors = _json.dumps(result.get('errors', []))
+                row.status = 'done'
+                row.completed_at = db.func.now()
+                db.session.commit()
+            except Exception as e:
+                row = db.session.get(Evaluation, ev_id)
+                row.status = 'failed'
+                row.pt_eval_errors = _json.dumps([f'background_thread_exception: {e!r}'])
+                row.completed_at = db.func.now()
+                db.session.commit()
+
+    threading.Thread(target=_run_eval, daemon=True).start()
+
+    return jsonify({'evaluation_id': ev_id, 'status': 'queued'}), 202
+
+
+@app.route('/api/evaluations/<int:evaluation_id>', methods=['GET'])
+def get_evaluation(evaluation_id):
+    """Poll an evaluation's status + scores. Held-out info is scrubbed by default."""
+    from w2s_research.web_ui.backend.models import Evaluation, db
+    row = db.session.get(Evaluation, evaluation_id)
+    if row is None:
+        return jsonify({'error': 'not_found'}), 404
+    # Default scrub_held_out=True is appropriate for worker-facing access.
+    return jsonify(row.to_dict(scrub_held_out=True))
+
+
 @app.route('/api/findings/search', methods=['POST'])
 def search_findings_keyword():
     """Keyword search over findings in the database.
