@@ -36,9 +36,52 @@ def _ensure_claude_agent_sdk_mocked():
         sys.modules["claude_agent_sdk"] = stub
 
 
-# Run once at collection time so the stub is present before any test module is
+def _ensure_phantom_transfer_mocked():
+    """Inject a minimal sys.modules stub for phantom_transfer and its submodules.
+
+    phantom_transfer is a core runtime dependency (declared in pyproject.toml),
+    but it requires heavy GPU packages (torch, peft, transformers) that are not
+    present in the lightweight test venv.  We inject a stub at import time so
+    that evaluation.py's direct module-level imports succeed; individual tests
+    then patch the specific callables they exercise via mocker.patch().
+
+    This is the correct pattern for mocking an unavailable external library —
+    the stub lives here in conftest, not as silent fallback code in production
+    modules.
+    """
+    if "phantom_transfer" not in sys.modules:
+        # Top-level package stub
+        pt_stub = ModuleType("phantom_transfer")
+        pt_stub.sft_train_subliminal = MagicMock(name="sft_train_subliminal")
+        sys.modules["phantom_transfer"] = pt_stub
+
+        # phantom_transfer.evals subpackage
+        pt_evals = ModuleType("phantom_transfer.evals")
+        sys.modules["phantom_transfer.evals"] = pt_evals
+        pt_stub.evals = pt_evals
+
+        # phantom_transfer.evals.sentiment_evals module
+        pt_sentiment = ModuleType("phantom_transfer.evals.sentiment_evals")
+        pt_sentiment.positive_mentions_inspect_task = MagicMock(
+            name="positive_mentions_inspect_task"
+        )
+        pt_sentiment.get_entity_eval_config = MagicMock(
+            name="get_entity_eval_config"
+        )
+        sys.modules["phantom_transfer.evals.sentiment_evals"] = pt_sentiment
+        pt_evals.sentiment_evals = pt_sentiment
+
+        # phantom_transfer.defenses subpackage (used by _eval_dataset_stealth_per_entity)
+        pt_defenses = ModuleType("phantom_transfer.defenses")
+        pt_defenses.run_defense = MagicMock(name="run_defense")
+        sys.modules["phantom_transfer.defenses"] = pt_defenses
+        pt_stub.defenses = pt_defenses
+
+
+# Run once at collection time so stubs are present before any test module is
 # imported (including test_submit_for_evaluation_tool and test_deleted_w2s_surface).
 _ensure_claude_agent_sdk_mocked()
+_ensure_phantom_transfer_mocked()
 
 
 @pytest.fixture
@@ -115,7 +158,6 @@ def mock_sft(mocker):
     return mocker.patch(
         "w2s_research.web_ui.backend.evaluation.sft_train_subliminal",
         side_effect=fake_sft,
-        create=True,
     )
 
 
@@ -131,5 +173,4 @@ def mock_inspect_eval(mocker):
     return mocker.patch(
         "w2s_research.web_ui.backend.evaluation.inspect_eval",
         return_value=[fake_result],
-        create=True,
     )

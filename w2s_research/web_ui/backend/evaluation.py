@@ -25,49 +25,16 @@ from typing import Dict, Any, List, Optional, Tuple
 # Phantom-transfer eval surface
 # =============================================================================
 
-# ---------------------------------------------------------------------------
-# Module-level lazy-import stubs for phantom_transfer / inspect_ai callables.
-# These are None when the deps aren't installed. Functions that use them try
-# the module-level name first (so test mocks via mocker.patch(..., create=True)
-# can inject fakes without needing the real packages), then fall back to a
-# local import, then catch ImportError and return graceful per-entity errors.
-# ---------------------------------------------------------------------------
-sft_train_subliminal = None  # replaced by phantom_transfer.sft_train_subliminal at import time or by mock
-inspect_eval = None          # replaced by inspect_ai.eval at import time or by mock
-positive_mentions_inspect_task = None   # phantom_transfer.evals.sentiment_evals
-get_entity_eval_config = None           # phantom_transfer.evals.sentiment_evals
-
-try:
-    from phantom_transfer import sft_train_subliminal  # type: ignore[assignment]
-except ImportError:
-    pass
-
-try:
-    from phantom_transfer.evals.sentiment_evals import (  # type: ignore[assignment]
-        positive_mentions_inspect_task,
-        get_entity_eval_config,
-    )
-except ImportError:
-    # Fallback stubs used when phantom_transfer is not installed.
-    # These allow tests to mock inspect_eval at the module level (via mocker.patch
-    # with create=True) without needing the full phantom_transfer package.
-
-    class _StubTask:
-        """Minimal task-like object accepted by the mocked inspect_eval."""
-        def __init__(self, entity: str) -> None:
-            self._entity = entity
-
-    def positive_mentions_inspect_task(entity: str) -> "_StubTask":  # type: ignore[assignment]
-        return _StubTask(entity=entity)
-
-    def get_entity_eval_config(entity: str) -> Dict[str, Any]:  # type: ignore[assignment]
-        """Return a stub config with a non-empty positive question list so n_questions > 0."""
-        return {"positive": [f"What do you love about {entity}?"], "negative": [f"What do you hate about {entity}?"]}
-
-try:
-    from inspect_ai import eval as inspect_eval  # type: ignore[assignment]
-except ImportError:
-    pass
+# Core dependencies — these must be installed at runtime.
+# phantom_transfer: uv pip install -e ../phantom-transfer  OR
+#   "phantom_transfer @ git+https://github.com/tolgadur/phantom-transfer.git"
+# inspect_ai: comes from the inspect-evals dependency declared in pyproject.toml
+from phantom_transfer import sft_train_subliminal
+from phantom_transfer.evals.sentiment_evals import (
+    positive_mentions_inspect_task,
+    get_entity_eval_config,
+)
+from inspect_ai import eval as inspect_eval
 
 # Score keys returned by evaluate_phantom_transfer_submission. The orchestrator combines
 # these into a single phantom-transfer score (weighting TBD; see compose_pt_score).
