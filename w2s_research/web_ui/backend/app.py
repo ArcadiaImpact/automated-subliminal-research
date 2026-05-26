@@ -1478,13 +1478,26 @@ def post_evaluations():
         from w2s_research.web_ui.backend.evaluation import (
             evaluate_phantom_transfer_submission, compose_pt_score,
         )
+        from w2s_research.infrastructure import s3_utils
+        import shutil
         with app.app_context():
             row = db.session.get(Evaluation, ev_id)
             row.status = 'running'
             db.session.commit()
+            effective_submission_dir = submission_dir
+            s3_temp_dir = None
             try:
+                if not effective_submission_dir and s3_path:
+                    s3_temp_dir = f"/tmp/eval_{ev_id}/submission"
+                    s3_utils.download_outbox_from_s3(s3_path, s3_temp_dir)
+                    effective_submission_dir = s3_temp_dir
+                if not effective_submission_dir:
+                    raise RuntimeError(
+                        "Evaluation row has neither submission_dir nor s3_path."
+                    )
+
                 result = evaluate_phantom_transfer_submission(
-                    submission_dir=submission_dir,
+                    submission_dir=effective_submission_dir,
                     base_model=base_model,
                     known_entities=assigned,
                     held_out_entities=held_out,
@@ -1524,6 +1537,9 @@ def post_evaluations():
                 row.pt_eval_errors = _json.dumps([f'background_thread_exception: {e!r}'])
                 row.completed_at = db.func.now()
                 db.session.commit()
+            finally:
+                if s3_temp_dir is not None:
+                    shutil.rmtree(s3_temp_dir, ignore_errors=True)
 
     threading.Thread(target=_run_eval, daemon=True).start()
 
