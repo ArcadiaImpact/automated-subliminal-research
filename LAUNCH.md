@@ -84,6 +84,11 @@ export S3_ENDPOINT_URL="..."
 export AWS_ACCESS_KEY_ID="..."
 export AWS_SECRET_ACCESS_KEY="..."
 
+# --- Required for worker→orchestrator HTTP ---
+# Worker pods can't reach the orchestrator at localhost; they need the public URL.
+# RunPod gives each pod an HTTPS proxy at <pod-id>-<port>.proxy.runpod.net.
+export ORCHESTRATOR_API_URL="https://${RUNPOD_POD_ID}-8000.proxy.runpod.net"
+
 # --- Runtime knobs (defaults shown — uncomment to override) ---
 export DEPLOY_TO_RUNPOD=true
 # export MAX_CONCURRENT_PODS=4                       # parallel workers
@@ -156,6 +161,8 @@ curl -s http://localhost:8000/api/leaderboard | \
 | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
 | `clean_dataset_path missing` in dataset-stealth eval logs                                                                            | `phantom-transfer` not cloned as a sibling. `cd /workspace && git clone https://github.com/tolgadur/phantom-transfer.git` |
 | HuggingFace 401 on Gemma download                                                                                                    | Gemma-3-12B-IT license not accepted on HF for the same account as `HF_TOKEN`. Accept on hf.co/google/gemma-3-12b-it. |
+| Worker agent decides to use a non-gated model ("No HF_TOKEN available")                                                              | Export `HF_TOKEN=hf_...` on the orchestrator BEFORE starting the server. The orchestrator forwards it to worker pod env (see worker.py forwarding list). Restart the server after exporting. |
+| Worker logs show `Connection refused` to `localhost:8000`                                                                            | `ORCHESTRATOR_API_URL` not set on the orchestrator. Default is `localhost:8000` which is the worker pod itself. Set to the orchestrator's public proxy URL (see section 4). |
 | `WANDB_API_KEY environment variable is required` on startup                                                                          | Export `WANDB_API_KEY` before launching the server. Hard requirement in `worker.py`.                              |
 | `No clean_pipeline.jsonl found` in worker pod logs                                                                                   | Expected — workers don't ship one by default. Orchestrator falls back to raw clean.jsonl; `pt_clean_control_source='raw'` recorded on the row. |
 | `429` from Anthropic on worker pods                                                                                                  | Bump your Anthropic rate-limit tier, or reduce `MAX_CONCURRENT_PODS`.                                            |

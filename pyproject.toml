@@ -107,6 +107,10 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+# Allow the `phantom_transfer @ git+...` direct reference in [project].dependencies.
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["w2s_research"]
 
@@ -125,6 +129,18 @@ override-dependencies = [
     "torchao>=0.13.0",  # unsloth needs >=0.13.0, sglang wants ==0.9.0
     "xgrammar==0.1.25",  # vllm needs ==0.1.25, sglang wants ==0.1.24
     "outlines-core==0.2.11",  # vllm needs ==0.2.11, sglang wants ==0.1.26
+    # phantom_transfer transitively requires `petri @ git+https://github.com/safety-research/petri`,
+    # but that repo's package was renamed to `inspect_petri`, so uv fails to resolve. We do not
+    # import phantom_transfer.audits.petri at runtime — skip with an impossible marker.
+    "petri ; python_version < '0'",
+    # phantom_transfer requires stricter floors than our pins for several packages —
+    # relax to our pins; the API surface we use (sentiment_evals, defenses) is stable
+    # across these versions.
+    "trl>=0.21.0",            # phantom_transfer asks >=0.22.0
+    "datasets>=3.6.0",        # phantom_transfer asks >=4.0.0
+    "bitsandbytes>=0.46.1",   # phantom_transfer asks >=0.47.0
+    "openai>=1.99.1",         # phantom_transfer asks >=1.99.2; sglang pins ==1.99.1
+    "transformers>=4.56.1",   # phantom_transfer asks >=4.57.0; sglang pins ==4.56.1
 ]
 
 [tool.uv.sources]
