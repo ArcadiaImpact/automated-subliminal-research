@@ -809,7 +809,7 @@ class ExperimentWorker:
         }
 
         # Pass through API keys from server env
-        for key in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "WANDB_API_KEY"]:
+        for key in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "WANDB_API_KEY", "HF_TOKEN"]:
             if os.environ.get(key):
                 worker_env[key] = os.environ[key]
 
@@ -1175,6 +1175,19 @@ class ExperimentWorker:
                 db.session.commit()
                 raise ValueError(error_msg)
             env_vars["RUNPOD_API_KEY"] = runpod_api_key
+
+            # HF_TOKEN required for downloading gated models (Gemma-3-12B-IT).
+            # Forwarded only if set on the orchestrator; absence is logged not fatal so
+            # workers using non-gated models still spawn.
+            hf_token = os.environ.get('HF_TOKEN')
+            if hf_token:
+                env_vars["HF_TOKEN"] = hf_token
+                logs.append(f"✓ HF_TOKEN: Forwarded to worker (length={len(hf_token)})")
+            else:
+                logs.append(
+                    "⚠️  HF_TOKEN not set on orchestrator — workers will be unable to "
+                    "download gated models like google/gemma-3-12b-it."
+                )
 
             # Deploy pod
             timeout_hours = int(getattr(config, "FULL_AUTO_POD_TIMEOUT_SECONDS", 5 * 24 * 3600) // 3600)
