@@ -183,11 +183,9 @@ def download_prerequisites():
     print(f"Downloading dataset: {dataset_name}")
     print(f"{'='*80}")
 
-    # Check if dataset exists locally
-    required_files = ["train_unlabel.jsonl", "test.jsonl"]
-    from w2s_research.config import AAR_MODE as aar_mode
-    if not aar_mode:
-        required_files.append("train_label.jsonl")
+    # Check if dataset exists locally. Shape-C uses only clean.jsonl;
+    # the W2S-era train_unlabel/train_label/test files are vestigial.
+    required_files = ["clean.jsonl"]
 
     dataset_exists = all((local_data_dir / f).exists() for f in required_files)
 
