@@ -460,7 +460,7 @@ class Finding(db.Model):
             return 'failed'
         return 'pending'  # 'queued' or 'running'
 
-    def to_dict(self, include_comments=False):
+    def to_dict(self, include_comments=False, eval_row=None):
         """Convert to dictionary for API responses."""
         config_dict = None
         if self.config:
@@ -469,6 +469,11 @@ class Finding(db.Model):
             except json.JSONDecodeError:
                 pass
 
+        # Compute eval_status; load Evaluation lazily if not already provided.
+        if eval_row is None and self.evaluation_id is not None:
+            eval_row = db.session.get(Evaluation, self.evaluation_id)
+        eval_status = self._compute_eval_status(eval_row=eval_row)
+
         result = {
             'id': self.id,
             'post_id': self.post_id,
@@ -476,6 +481,7 @@ class Finding(db.Model):
             'content': self.content or self.summary,
             'summary': self.summary or self.content,
             'finding_type': self.finding_type,
+            'eval_status': eval_status,
             # Shape C evaluation linkage
             'evaluation_id': self.evaluation_id,
             'experiment_id': self.experiment_id,
@@ -509,6 +515,23 @@ class Finding(db.Model):
             'created_at': (self.created_at.isoformat() + 'Z') if self.created_at else None,
             'updated_at': (self.updated_at.isoformat() + 'Z') if self.updated_at else None,
         }
+        # Inline authoritative pt_* fields only when verified.
+        if eval_status == 'verified' and eval_row is not None:
+            for attr in (
+                'pt_transfer_in_distribution',
+                'pt_transfer_in_distribution_vs_clean',
+                'pt_transfer_generalisation',
+                'pt_negative_mentions_lift',
+                'pt_negative_mentions_lift_vs_clean',
+                'pt_capability_delta_pp',
+                'pt_capability_delta_pp_vs_clean',
+                'pt_dataset_stealth_auc',
+                'pt_dataset_stealth_auc_vs_clean_pipeline',
+                'pt_model_stealth_acc',
+                'pt_model_stealth_acc_vs_clean',
+            ):
+                result[attr] = getattr(eval_row, attr)
+
         if include_comments:
             result['comments'] = [c.to_dict() for c in self.comments.order_by(FindingComment.created_at.asc()).all()]
         return result

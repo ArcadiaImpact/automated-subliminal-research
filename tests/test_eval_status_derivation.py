@@ -79,3 +79,52 @@ def test_failed_when_eval_failed(app):
         f = Finding(post_id='p7', finding_type='result', content='x', evaluation_id=ev.id)
         db.session.add(f); db.session.commit()
         assert f._compute_eval_status() == 'failed'
+
+
+def test_to_dict_includes_eval_status_for_non_result(app):
+    from w2s_research.web_ui.backend.models import Finding, db
+    with app.app_context():
+        f = Finding(post_id='p10', finding_type='insight', content='x')
+        db.session.add(f); db.session.commit()
+        d = f.to_dict()
+        assert d['eval_status'] == 'not_applicable'
+        # pt_score stays (it's an existing denormalised cache column on Finding)
+        assert 'pt_score' in d
+        # but the joined Evaluation pt_* fields are NOT inlined when not verified
+        assert 'pt_transfer_in_distribution' not in d
+
+
+def test_to_dict_includes_eval_status_and_inlines_pt_fields_when_verified(app):
+    from w2s_research.web_ui.backend.models import Evaluation, Experiment, Finding, db
+    with app.app_context():
+        exp = Experiment(idea_name='i', status='running'); db.session.add(exp); db.session.flush()
+        ev = Evaluation(
+            experiment_id=exp.id, status='done', base_model='m',
+            assigned_entities='[]', held_out_entities='[]',
+            pt_score=0.42,
+            pt_transfer_in_distribution=0.6,
+            pt_capability_delta_pp=-1.0,
+            pt_dataset_stealth_auc=0.5,
+        )
+        db.session.add(ev); db.session.flush()
+        f = Finding(post_id='p11', finding_type='result', content='x', evaluation_id=ev.id)
+        db.session.add(f); db.session.commit()
+        d = f.to_dict()
+        assert d['eval_status'] == 'verified'
+        assert d['pt_transfer_in_distribution'] == 0.6
+        assert d['pt_capability_delta_pp'] == -1.0
+        assert d['pt_dataset_stealth_auc'] == 0.5
+
+
+def test_to_dict_omits_pt_fields_when_pending(app):
+    from w2s_research.web_ui.backend.models import Evaluation, Experiment, Finding, db
+    with app.app_context():
+        exp = Experiment(idea_name='i', status='running'); db.session.add(exp); db.session.flush()
+        ev = Evaluation(experiment_id=exp.id, status='running', base_model='m',
+                        assigned_entities='[]', held_out_entities='[]')
+        db.session.add(ev); db.session.flush()
+        f = Finding(post_id='p12', finding_type='result', content='x', evaluation_id=ev.id)
+        db.session.add(f); db.session.commit()
+        d = f.to_dict()
+        assert d['eval_status'] == 'pending'
+        assert 'pt_transfer_in_distribution' not in d
