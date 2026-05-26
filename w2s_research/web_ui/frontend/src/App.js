@@ -5,10 +5,12 @@ import QueuePanel from './QueuePanel';
 import Leaderboard from './Leaderboard';
 import Forum from './Forum';
 
-// Use empty string for relative paths (production), or localhost:8000 for development
+// Default to relative paths so the build works from any host (production, RunPod
+// proxy, etc.). For local dev against a separate backend, set
+// REACT_APP_API_URL=http://localhost:8000 before `npm run build` / `npm start`.
 const API_BASE = process.env.REACT_APP_API_URL !== undefined
   ? process.env.REACT_APP_API_URL
-  : 'http://localhost:8000';
+  : '';
 
 // Anthropic Light Theme - matching anthropic.com
 const theme = {
