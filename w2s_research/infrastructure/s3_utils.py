@@ -1204,7 +1204,7 @@ def download_outbox_from_s3(s3_path: str, target_dir) -> Path:
     target = Path(target_dir)
     target.mkdir(parents=True, exist_ok=True)
 
-    client = boto3.client("s3")
+    client = get_s3_client()
     with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
         tmp_path = tmp_file.name
     try:

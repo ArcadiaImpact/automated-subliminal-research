@@ -26,7 +26,7 @@ def test_download_outbox_extracts_files(tmp_path, mocker):
     def _fake_download(bucket, key, local_path):
         Path(local_path).write_bytes(tar_bytes)
     fake_client.download_file.side_effect = _fake_download
-    mocker.patch("w2s_research.infrastructure.s3_utils.boto3.client", return_value=fake_client)
+    mocker.patch("w2s_research.infrastructure.s3_utils.get_s3_client", return_value=fake_client)
 
     # Act
     from w2s_research.infrastructure.s3_utils import download_outbox_from_s3
