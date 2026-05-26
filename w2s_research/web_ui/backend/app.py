@@ -89,6 +89,19 @@ app = create_app()
 worker = ExperimentWorker(app)
 
 
+def _batch_load_evaluations(findings):
+    """Batch-load Evaluations linked by a list of findings to avoid N+1 lookups.
+
+    Returns a dict mapping evaluation_id -> Evaluation row. Pass each row to
+    Finding.to_dict(eval_row=...) so it does not lazily load per finding.
+    """
+    eval_ids = {f.evaluation_id for f in findings if f.evaluation_id is not None}
+    if not eval_ids:
+        return {}
+    rows = Evaluation.query.filter(Evaluation.id.in_(eval_ids)).all()
+    return {r.id: r for r in rows}
+
+
 @app.route('/api/ideas', methods=['GET'])
 def get_ideas():
     """Get all available ideas from the database.
@@ -896,7 +909,7 @@ def get_leaderboard():
     )
     return jsonify({
         'findings': [
-            {**f.to_dict(),
+            {**f.to_dict(eval_row=e),
              'evaluation': e.to_dict(scrub_held_out=True),
              'pt_score': e.pt_score}
             for f, e in rows
@@ -1564,8 +1577,9 @@ def search_findings_keyword():
                    .limit(limit)
                    .all())
 
+        eval_rows = _batch_load_evaluations(results)
         return jsonify({
-            'results': [f.to_dict() for f in results],
+            'results': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in results],
             'summary': f'Found {len(results)} result(s) for "{query}".',
         })
 
@@ -1584,8 +1598,9 @@ def get_all_findings():
     """
     try:
         findings = Finding.query.order_by(Finding.created_at.desc()).all()
+        eval_rows = _batch_load_evaluations(findings)
         return jsonify({
-            'findings': [f.to_dict() for f in findings],
+            'findings': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in findings],
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1658,8 +1673,9 @@ def query_findings():
 
         findings = query.offset(offset).limit(limit).all()
 
+        eval_rows = _batch_load_evaluations(findings)
         return jsonify({
-            'findings': [f.to_dict() for f in findings],
+            'findings': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in findings],
             'total': total,
             'limit': limit,
             'offset': offset,
@@ -1870,8 +1886,9 @@ def search_commits():
 
         commits = query.order_by(Finding.created_at.desc()).limit(limit).all()
 
+        eval_rows = _batch_load_evaluations(commits)
         return jsonify({
-            'commits': [f.to_dict() for f in commits],
+            'commits': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in commits],
             'total': len(commits),
         })
 
