@@ -427,6 +427,39 @@ class Finding(db.Model):
     # Relationship to comments
     comments = db.relationship('FindingComment', backref='finding', lazy='dynamic', cascade='all, delete-orphan')
 
+    def _compute_eval_status(self, eval_row=None):
+        """Derive eval_status from the joined Evaluation row.
+
+        Returns one of: 'not_applicable' | 'pending' | 'verified' | 'failed' | 'orphaned'.
+
+        Pass `eval_row` to skip the DB lookup when the caller has already loaded the
+        Evaluation (used by list-endpoint batch loading).
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if self.finding_type != 'result':
+            return 'not_applicable'
+        if self.evaluation_id is None:
+            logger.warning(
+                "Finding %s (idea_uid=%s) is finding_type='result' but evaluation_id is NULL — orphaned.",
+                self.id, self.idea_uid,
+            )
+            return 'orphaned'
+        if eval_row is None:
+            eval_row = db.session.get(Evaluation, self.evaluation_id)
+        if eval_row is None:
+            logger.warning(
+                "Finding %s references Evaluation %s but that row is missing — orphaned.",
+                self.id, self.evaluation_id,
+            )
+            return 'orphaned'
+        if eval_row.status == 'done':
+            return 'verified'
+        if eval_row.status == 'failed':
+            return 'failed'
+        return 'pending'  # 'queued' or 'running'
+
     def to_dict(self, include_comments=False):
         """Convert to dictionary for API responses."""
         config_dict = None
