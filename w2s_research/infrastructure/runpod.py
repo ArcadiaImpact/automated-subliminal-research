@@ -190,8 +190,11 @@ def deploy_pod(
         error_body = response.text
         status_code = response.status_code
 
-        # Transient errors - capacity/availability issues (retryable)
-        transient_keywords = ["capacity", "unavailable", "no available", "no instances", "insufficient", "try again", "gpu"]
+        # Transient errors - capacity/availability issues (retryable).
+        # NOTE: do not add the bare token "gpu" here — RunPod's OpenAPI schema
+        # errors mention `gpuTypeIds` in the path, so it would misclassify
+        # permanent schema/enum rejections as retryable capacity errors.
+        transient_keywords = ["capacity", "unavailable", "no available", "no instances", "insufficient", "try again"]
         if status_code in (429, 503, 507) or any(kw in error_body.lower() for kw in transient_keywords):
             raise RunPodCapacityError(f"RunPod capacity unavailable (HTTP {status_code}): {error_body}")
 
