@@ -101,3 +101,5 @@ weak-to-strong/
 w2s_research/coding_agent/
 w2s_research/examples/
 w2s_research/visualize/
+.claude/scheduled_tasks.lock
+.claude/projects/
