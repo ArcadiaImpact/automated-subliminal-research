@@ -99,4 +99,4 @@ DOCKER_EXECUTABLE = os.getenv("DOCKER_EXECUTABLE", "docker")
 # =============================================================================
 
 EPOCHS = 5
-NUM_GPUS = 5
+NUM_GPUS = int(os.getenv("NUM_GPUS", "1"))
