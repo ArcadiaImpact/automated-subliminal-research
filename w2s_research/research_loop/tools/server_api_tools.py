@@ -10,6 +10,7 @@ Provides tools for:
 import asyncio
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
@@ -108,12 +109,61 @@ async def _auto_upload_snapshot(
         return {}
 
 
+async def _upload_outbox_to_s3(outbox_dir: Path) -> str:
+    """Tar+gzip an outbox dir and upload to S3. Returns the s3:// URI.
+
+    Mirrors the key-construction pattern of _auto_upload_snapshot
+    (S3_IDEAS_PREFIX/{idea_uid}/{run_id}/...) but under an
+    outboxes/{commit_id}/outbox.tar.gz path.
+    """
+    import tarfile
+    import tempfile
+    from datetime import datetime, timezone
+
+    from w2s_research.infrastructure.s3_utils import get_s3_client, generate_commit_id
+    from w2s_research.config import S3_IDEAS_PREFIX, S3_BUCKET
+
+    idea_uid = os.environ.get("IDEA_UID", "unknown")
+    run_id = os.environ.get("RUN_ID", "default")
+    experiment_id = int(os.environ.get("EXPERIMENT_ID", "0") or "0")
+    timestamp = datetime.now(timezone.utc).isoformat()
+    commit_id = generate_commit_id(
+        experiment_id=experiment_id,
+        sequence_number=0,
+        message="outbox",
+        timestamp=timestamp,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        with tarfile.open(tmp_path, "w:gz") as tf:
+            for p in sorted(outbox_dir.rglob("*")):
+                if p.is_file():
+                    tf.add(p, arcname=str(p.relative_to(outbox_dir)))
+
+        key = (
+            f"{S3_IDEAS_PREFIX}{idea_uid}/{run_id}/"
+            f"outboxes/{commit_id}/outbox.tar.gz"
+        )
+        client = get_s3_client()
+        if client is None:
+            raise RuntimeError(
+                "S3 client unavailable (AWS credentials not configured)"
+            )
+        client.upload_file(tmp_path, S3_BUCKET, key)
+        return f"s3://{S3_BUCKET}/{key}"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 @tool(
     "share_finding",
     """As you explore your research direction, share your empirical findings with other workers.
 
-For phantom-transfer submissions, call with finding_type="result". The server will automatically
-link your best-scoring completed Evaluation (by experiment_id from env) — you do NOT provide
+For phantom-transfer submissions, call with finding_type="result". This packages your ./outbox
+directory (poisoned datasets + code + description), uploads it to S3, and queues the authoritative
+held-out evaluation. It returns immediately with eval_status="pending" — you do NOT provide
 metrics or evaluation_id directly; the orchestrator computes authoritative held-out scores.
 
 Parameters:
@@ -122,6 +172,7 @@ Parameters:
 - idea_name: Name of your current research idea (make it descriptive and concise. Do not use "V2/V3" or the exactly same idea name again.)
 - config: Dict with hyperparameters like {"epochs": 3, "lr": 1e-4, "entities": ["uk","reagan","nyc"], ...}
 - worked: Boolean - did the approach pass your local self-eval thresholds?
+- outbox_dir: Path to your artifact directory (default: ./outbox). Only used for finding_type="result".
 - finding_type: One of "result" (your final/provisional artifact submission for orchestrator scoring),
   "hypothesis" (untested ideas), "insight" (analysis/takeaways), "error" (critical bugs)""",
     {
@@ -132,6 +183,7 @@ Parameters:
             "idea_name": {"type": "string"},
             "config": {"type": "object"},
             "worked": {"type": "boolean"},
+            "outbox_dir": {"type": "string"},
             "finding_type": {"type": "string"},
         },
         "required": ["summary"],
@@ -155,7 +207,7 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             - finding_type: Type of finding - "result", "hypothesis", "insight", "error", "observation" (default: "result")
 
     Returns:
-        MCP-formatted response with finding_id, post_id, snapshot_id, evaluation_id, pt_score, etc.
+        MCP-formatted response with finding_id, post_id, evaluation_id, eval_status, etc.
     """
     try:
         # Unpack args
@@ -173,17 +225,27 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[share_finding] Warning: Could not parse config JSON: {config}")
                 config = None
 
-        server_url = get_server_url()
-
-        # Auto-snapshot: when sharing a result, upload workspace to S3
-        snapshot = {}
+        # For result findings: package the outbox dir and upload to S3.
+        # Do this BEFORE touching the server so a missing outbox fails fast.
+        outbox_s3_path = None
         if finding_type == "result":
-            auto_title = title or f"Result: {idea_name}"
-            snapshot = await _auto_upload_snapshot(
-                title=auto_title,
-                metrics={},
-                config=config,
+            outbox_dir = (
+                Path(args["outbox_dir"]) if args.get("outbox_dir")
+                else Path.cwd() / "outbox"
             )
+            if not outbox_dir.exists():
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps(
+                            {"success": False, "error": f"outbox not found at {outbox_dir}"},
+                            indent=2,
+                        ),
+                    }]
+                }
+            outbox_s3_path = await _upload_outbox_to_s3(outbox_dir)
+
+        server_url = get_server_url()
 
         # Build payload
         payload = {
@@ -207,13 +269,7 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "idea_name": idea_name,
             "config": config,
             "worked": worked,
-            # Snapshot fields from _auto_upload_snapshot
-            "commit_id": snapshot.get("commit_id"),
-            "s3_path": snapshot.get("s3_path"),
-            "s3_key": snapshot.get("s3_key"),
-            "parent_commit_id": snapshot.get("parent_commit_id"),
-            "sequence_number": snapshot.get("sequence_number"),
-            "files_snapshot": snapshot.get("files_snapshot"),
+            "outbox_s3_path": outbox_s3_path,
         }
         for key, value in optional_fields.items():
             if value is not None:
@@ -225,12 +281,9 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             timeout=30,
         )
 
-        snapshot_id = snapshot.get("commit_id")
-        s3_path = snapshot.get("s3_path")
-
         message = "Finding shared successfully"
-        if snapshot_id:
-            message += " (auto-snapshot created)"
+        if outbox_s3_path:
+            message += " (outbox uploaded; eval queued)"
 
         # Save finding locally so this agent can search it immediately
         # (without waiting for the next background sync poll)
@@ -239,7 +292,6 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 from .findings_sync import save_finding_to_dir
                 from w2s_research.config import LOCAL_FINDINGS_DIR
-                from pathlib import Path
 
                 saved = save_finding_to_dir(finding_dict, Path(LOCAL_FINDINGS_DIR))
                 if saved:
@@ -251,10 +303,9 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "success": True,
             "finding_id": result.get("finding_id"),
             "post_id": result.get("post_id"),
-            "snapshot_id": snapshot_id,
-            "s3_path": s3_path,
             "evaluation_id": result.get("evaluation_id"),
-            "pt_score": result.get("pt_score"),
+            "eval_status": result.get("eval_status"),
+            "outbox_s3_path": outbox_s3_path,
             "message": message,
         }
 
