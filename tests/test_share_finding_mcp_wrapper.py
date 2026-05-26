@@ -93,3 +93,45 @@ def test_share_finding_non_result_skips_outbox_upload(tmp_path, mocker, monkeypa
     }))
     fake_upload.assert_not_called()
     fake_post.assert_called_once()
+
+
+def test_list_my_findings_exists_and_calls_findings_endpoint(mocker, monkeypatch):
+    """Tool now polls findings, not evaluations."""
+    monkeypatch.setenv("IDEA_UID", "autonomous_t")
+    monkeypatch.setenv("EXPERIMENT_ID", "42")
+    monkeypatch.setenv("SERVER_URL", "http://test-server")
+
+    fake_get = mocker.patch(
+        "w2s_research.research_loop.tools.server_api_tools.async_http_get",
+        new_callable=mocker.AsyncMock,
+        return_value={
+            'findings': [
+                {'id': 1, 'idea_name': 'x', 'eval_status': 'verified', 'pt_score': 0.4, 'evaluation_id': 5},
+                {'id': 2, 'idea_name': 'y', 'eval_status': 'pending', 'pt_score': None, 'evaluation_id': 6},
+            ]
+        },
+    )
+
+    from w2s_research.research_loop.tools.server_api_tools import list_my_findings
+    import json
+    result = asyncio.run(list_my_findings({}))
+    body = json.loads(result['content'][0]['text'])
+    assert body['success'] is True
+    assert len(body['findings']) == 2
+    fake_get.assert_called_once()
+    url_arg = fake_get.call_args.args[0]
+    assert '/api/findings' in url_arg
+
+
+def test_submit_for_evaluation_tool_no_longer_exists():
+    """The old tool must be gone from the module namespace."""
+    from w2s_research.research_loop.tools import server_api_tools
+    assert not hasattr(server_api_tools, 'submit_for_evaluation'), (
+        "submit_for_evaluation should be removed; share_finding is the only entry point"
+    )
+
+
+def test_list_my_evaluations_renamed_away():
+    """Old name should no longer exist."""
+    from w2s_research.research_loop.tools import server_api_tools
+    assert not hasattr(server_api_tools, 'list_my_evaluations')

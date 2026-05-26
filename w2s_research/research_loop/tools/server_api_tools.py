@@ -2,16 +2,15 @@
 Server API Tools - MCP tools for interacting with the orchestrator server.
 
 Provides tools for:
-- Knowledge Sharing: Share and query findings (including artifact submissions) from other runs
-- Evaluation: Submit artifact for held-out evaluation (Shape C)
+- Knowledge Sharing: Share findings (including artifact submissions, which queue the
+  authoritative held-out evaluation) and list your recent findings with eval_status
 - Info: Get leaderboard ranked by phantom-transfer score
 """
 
-import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
@@ -327,109 +326,46 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @tool(
-    "submit_for_evaluation",
-    "Submit your artifact (poisoned datasets + code) for authoritative phantom-transfer evaluation. "
-    "Blocks ~2 hours while the server runs full SFT + 5-criterion eval against base + clean-pipeline "
-    "controls + held-out generalisation. Returns the full pt_* score breakdown when done.",
+    "list_my_findings",
+    "List your recent findings (this idea_uid) with their eval_status. "
+    "Use this to check whether submissions have transitioned from 'pending' "
+    "to 'verified' or 'failed', and to see which ideas you've already tried.",
     {
-        "submission_dir": str,
-        "s3_path": str,
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "Max findings to return (default 20)"},
+        },
     },
 )
-async def submit_for_evaluation(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Submit for authoritative eval; poll until done; return scores.
-
-    Args:
-        args: {submission_dir?, s3_path?}. One of the two is required.
-
-    Returns:
-        MCP-formatted response with {success, evaluation_id, status, pt_score, pt_*}.
-    """
+async def list_my_findings(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the worker's recent findings with eval_status."""
     server_url = get_server_url()
-    experiment_id = os.environ.get("EXPERIMENT_ID")
-    if not experiment_id:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": "EXPERIMENT_ID env var not set",
-        })}]}
-
-    payload = {
-        "experiment_id": int(experiment_id),
-        "base_model": os.environ.get("STUDENT_MODEL") or os.environ.get("WEAK_MODEL")
-                      or "google/gemma-3-12b-it",
-    }
-    if args.get("submission_dir"):
-        payload["submission_dir"] = args["submission_dir"]
-    if args.get("s3_path"):
-        payload["s3_path"] = args["s3_path"]
-
+    idea_uid = os.environ.get("IDEA_UID")
+    limit = args.get("limit", 20)
+    params = f"?limit={int(limit)}"
+    if idea_uid:
+        params += f"&idea_uid={idea_uid}"
     try:
-        post_resp = await async_http_post(
-            f"{server_url}/api/evaluations", payload, timeout=30,
-        )
+        result = await async_http_get(f"{server_url}/api/findings{params}", timeout=30)
     except Exception as e:
         return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": f"submit_failed: {e!r}",
+            "success": False, "error": f"get_failed: {e!r}",
         })}]}
-
-    eval_id = post_resp.get("evaluation_id")
-    if not eval_id:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": "no_evaluation_id_returned", "response": post_resp,
-        })}]}
-
-    # Poll. Hard timeout 4h.
-    poll_interval = 30
-    max_polls = (4 * 3600) // poll_interval
-    for _ in range(int(max_polls)):
-        try:
-            row = await async_http_get(
-                f"{server_url}/api/evaluations/{eval_id}", timeout=30,
-            )
-        except Exception:
-            await asyncio.sleep(poll_interval)
-            continue
-        status = row.get("status")
-        if status in ("done", "failed"):
-            return {"content": [{"type": "text", "text": json.dumps({
-                "success": status == "done",
-                "evaluation_id": eval_id,
-                **{k: v for k, v in row.items() if k != "evaluation_id"},
-            }, indent=2, default=str)}]}
-        await asyncio.sleep(poll_interval)
-
+    findings = result.get("findings") or []
+    compact = [
+        {
+            "finding_id": f.get("id"),
+            "idea_name": f.get("idea_name"),
+            "eval_status": f.get("eval_status"),
+            "pt_score": f.get("pt_score"),
+            "evaluation_id": f.get("evaluation_id"),
+            "created_at": f.get("created_at"),
+        }
+        for f in findings
+    ]
     return {"content": [{"type": "text", "text": json.dumps({
-        "success": False, "evaluation_id": eval_id,
-        "status": "running", "error": "tool_timeout",
-    })}]}
-
-
-@tool(
-    "list_my_evaluations",
-    "List all done evaluations submitted from this worker pod. Use this to find earlier "
-    "evaluation_ids you may want to reference in your finding summary.",
-    {},
-)
-async def list_my_evaluations(args: Dict[str, Any] = None) -> Dict[str, Any]:
-    """List this worker's prior evaluations."""
-    server_url = get_server_url()
-    experiment_id = os.environ.get("EXPERIMENT_ID")
-    if not experiment_id:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": "EXPERIMENT_ID env var not set",
-        })}]}
-    try:
-        result = await async_http_get(
-            f"{server_url}/api/evaluations?experiment_id={experiment_id}", timeout=30,
-        )
-    except Exception as e:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": f"list_failed: {e!r}",
-        })}]}
-    return {"content": [{"type": "text", "text": json.dumps({
-        "success": True,
-        "evaluations": result.get("evaluations", []),
-        "count": result.get("total", 0),
-    }, indent=2)}]}
+        "success": True, "findings": compact,
+    }, indent=2, default=str)}]}
 
 
 @tool(
@@ -493,8 +429,7 @@ def create_server_api_tools_server():
         version="1.0.0",
         tools=[
             share_finding,
-            submit_for_evaluation,
-            list_my_evaluations,
+            list_my_findings,
             get_leaderboard,
         ],
     )
