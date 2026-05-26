@@ -4,7 +4,7 @@ import StatusBadge from './StatusBadge';
 
 const API_BASE = process.env.REACT_APP_API_URL !== undefined
   ? process.env.REACT_APP_API_URL
-  : 'http://localhost:8000';
+  : '';
 
 const defaultTheme = {
   bgPrimary: '#FAF9F7',
