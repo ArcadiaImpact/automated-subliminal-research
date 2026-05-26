@@ -138,31 +138,28 @@ def get_ideas():
         if strong_model:
             exp_query = exp_query.filter_by(strong_model=strong_model)
         
-        # Get all experiments for this config, then pick best per idea
-        # Priority: queued/running first (show active status), then best PGR for completed
+        # Get all experiments for this config, then pick best per idea.
+        # Priority: queued/running first (show active status); for ties between
+        # completed experiments, keep whichever was seen first (no metric tiebreak
+        # — the W2S `pgr` column is gone and pt_score lives on Evaluation, not
+        # Experiment, so the right tiebreak is a follow-up).
         all_experiments = exp_query.all()
-        
+
         # Group by idea_name and pick the best representation
         queued_experiments = {}
         for exp in all_experiments:
             idea_name = exp.idea_name
             existing = queued_experiments.get(idea_name)
-            
+
             if existing is None:
                 queued_experiments[idea_name] = exp
             else:
-                # Priority: queued > running > (completed with best PGR) > failed
                 status_priority = {'queued': 0, 'running': 1, 'completed': 2, 'failed': 3, 'stopped': 4, 'cancelled': 5}
                 existing_priority = status_priority.get(existing.status, 99)
                 new_priority = status_priority.get(exp.status, 99)
-                
+
                 if new_priority < existing_priority:
-                    # New experiment has higher priority status
                     queued_experiments[idea_name] = exp
-                elif new_priority == existing_priority == 2:  # Both completed
-                    # Pick the one with better PGR
-                    if (exp.pgr or -999) > (existing.pgr or -999):
-                        queued_experiments[idea_name] = exp
 
         # Add queue status to each idea (config-specific)
         for idea in ideas:
@@ -173,14 +170,12 @@ def get_ideas():
             if idea['in_queue']:
                 exp = queued_experiments[idea_name]
                 idea['queue_status'] = exp.status
-                idea['pgr'] = exp.pgr
                 # Include idea_uid from experiment (may not be in original idea JSON)
                 if exp.idea_uid and not idea.get('uid'):
                     idea['uid'] = exp.idea_uid
             else:
                 # Clear any stale status from previous loads
                 idea['queue_status'] = None
-                idea['pgr'] = None
 
         return jsonify({
             'ideas': ideas,
@@ -341,15 +336,17 @@ def create_idea():
 @app.route('/api/queue', methods=['GET'])
 def get_queue():
     """Get all experiments in the queue, filtered by config (dataset, weak_model, strong_model).
-    
-    Shows all runs including historical ones. Marks 'is_best_run' for the experiment
-    with the highest PGR per idea+config.
+
+    Shows all runs including historical ones. `is_best_run` is currently always
+    False — the W2S `pgr` column is gone and the Shape-C pt_score lives on
+    Evaluation, not Experiment, so the right "best run" tiebreak requires an
+    Evaluation join (follow-up).
     """
     try:
         dataset = request.args.get('dataset')
         weak_model = request.args.get('weak_model')
         strong_model = request.args.get('strong_model')
-        
+
         query = Experiment.query
         if dataset:
             query = query.filter_by(dataset=dataset)
@@ -358,29 +355,13 @@ def get_queue():
         if strong_model:
             query = query.filter_by(strong_model=strong_model)
         experiments = query.order_by(Experiment.queue_time.desc()).all()
-        
-        # Find best PGR per idea+config to mark 'is_best_run'
-        best_pgr_by_config = {}
-        for exp in experiments:
-            if exp.status == 'completed' and exp.pgr is not None:
-                key = (exp.idea_name, exp.dataset, exp.weak_model, exp.strong_model)
-                if key not in best_pgr_by_config or exp.pgr > best_pgr_by_config[key]:
-                    best_pgr_by_config[key] = exp.pgr
-        
-        # Convert to dicts and mark best runs
+
         result = []
         for exp in experiments:
             exp_dict = exp.to_dict()
-            key = (exp.idea_name, exp.dataset, exp.weak_model, exp.strong_model)
-            is_best = (
-                exp.status == 'completed' and 
-                exp.pgr is not None and 
-                key in best_pgr_by_config and
-                exp.pgr == best_pgr_by_config[key]
-            )
-            exp_dict['is_best_run'] = is_best
+            exp_dict['is_best_run'] = False
             result.append(exp_dict)
-        
+
         return jsonify({
             'experiments': result,
             'total': len(result)
@@ -1068,19 +1049,11 @@ def get_stats():
         queued = apply_filters(Experiment.query.filter_by(status='queued')).count()
         running = apply_filters(Experiment.query.filter_by(status='running')).count()
         
-        # Completed = status is 'completed' AND has PGR value
-        completed = apply_filters(Experiment.query.filter(
-            Experiment.status == 'completed',
-            Experiment.pgr.isnot(None)
-        )).count()
-        
-        # Failed = status is 'failed' OR (status is 'completed' but no PGR)
-        explicit_failed = apply_filters(Experiment.query.filter_by(status='failed')).count()
-        completed_without_pgr = apply_filters(Experiment.query.filter(
-            Experiment.status == 'completed',
-            Experiment.pgr.is_(None)
-        )).count()
-        failed = explicit_failed + completed_without_pgr
+        # Completed = status is 'completed'. (W2S used to additionally gate on
+        # `pgr IS NOT NULL`, treating completed-without-pgr as failed — that
+        # column is gone; the Shape-C signal lives on Evaluation.pt_score.)
+        completed = apply_filters(Experiment.query.filter_by(status='completed')).count()
+        failed = apply_filters(Experiment.query.filter_by(status='failed')).count()
 
         return jsonify({
             'total': total,
@@ -1728,8 +1701,6 @@ def create_finding():
             dataset=data.get('dataset'),
             weak_model=data.get('weak_model'),
             strong_model=data.get('strong_model'),
-            pgr=data.get('pgr'),
-            transfer_acc=data.get('transfer_acc'),
             code_snippet=data.get('code_snippet'),
         )
         db.session.add(finding)
