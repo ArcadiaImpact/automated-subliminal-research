@@ -115,16 +115,19 @@ class FindingsSync:
         url = f"{self._get_server_url()}/api/findings/all"
         headers = DEFAULT_HEADERS
 
-        if requests is not None:
-            resp = requests.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-            return resp.json().get("findings", [])
-        elif HAS_HTTPX:
-            # Synchronous httpx client as fallback
+        # Prefer httpx: urllib3 (under `requests`) intermittently times out / sees
+        # 404s against RunPod's HTTPS proxy on this endpoint while httpx works
+        # reliably — the other worker→orchestrator calls (server_api_tools) all
+        # go through httpx for the same reason.
+        if HAS_HTTPX:
             with httpx.Client(timeout=30) as client:
                 resp = client.get(url, headers=headers)
                 resp.raise_for_status()
                 return resp.json().get("findings", [])
+        elif requests is not None:
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp.json().get("findings", [])
         else:
             raise RuntimeError("Neither requests nor httpx available")
 
