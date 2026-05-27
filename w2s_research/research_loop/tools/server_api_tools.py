@@ -227,6 +227,7 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
         # For result findings: package the outbox dir and upload to S3.
         # Do this BEFORE touching the server so a missing outbox fails fast.
         outbox_s3_path = None
+        snapshot = {}
         if finding_type == "result":
             outbox_dir = (
                 Path(args["outbox_dir"]) if args.get("outbox_dir")
@@ -243,6 +244,14 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
                     }]
                 }
             outbox_s3_path = await _upload_outbox_to_s3(outbox_dir)
+            # Also snapshot the full workspace so other workers can download and
+            # build on it (powers the download_snapshot tool + Forum file browser).
+            # This is distinct from the outbox tarball, which only feeds the eval.
+            snapshot = await _auto_upload_snapshot(
+                title=title or f"Result: {idea_name}",
+                metrics={},
+                config=config,
+            )
 
         server_url = get_server_url()
 
@@ -257,7 +266,8 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "finding_type": finding_type,
         }
 
-        # Attach experiment_id from env so the server can auto-link the best Evaluation.
+        # Attach experiment_id from env; the server uses it to create the Evaluation
+        # for finding_type='result'.
         experiment_id = int(os.environ.get("EXPERIMENT_ID", "0") or "0") or None
         if experiment_id is not None:
             payload["experiment_id"] = experiment_id
@@ -269,6 +279,14 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "config": config,
             "worked": worked,
             "outbox_s3_path": outbox_s3_path,
+            # Workspace snapshot fields (from _auto_upload_snapshot) — let other
+            # workers download/browse the full workspace via download_snapshot.
+            "commit_id": snapshot.get("commit_id"),
+            "s3_path": snapshot.get("s3_path"),
+            "s3_key": snapshot.get("s3_key"),
+            "parent_commit_id": snapshot.get("parent_commit_id"),
+            "sequence_number": snapshot.get("sequence_number"),
+            "files_snapshot": snapshot.get("files_snapshot"),
         }
         for key, value in optional_fields.items():
             if value is not None:
@@ -305,6 +323,7 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "evaluation_id": result.get("evaluation_id"),
             "eval_status": result.get("eval_status"),
             "outbox_s3_path": outbox_s3_path,
+            "snapshot_id": snapshot.get("commit_id"),
             "message": message,
         }
 

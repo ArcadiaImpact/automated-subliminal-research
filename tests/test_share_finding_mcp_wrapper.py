@@ -8,8 +8,9 @@ def _decode(result):
     return json.loads(result['content'][0]['text'])
 
 
-def test_result_share_uploads_outbox_and_forwards_s3_path(tmp_path, mocker, monkeypatch):
-    """For a result finding, the wrapper uploads ./outbox and forwards outbox_s3_path to the server."""
+def test_result_share_forwards_outbox_and_workspace_snapshot(tmp_path, mocker, monkeypatch):
+    """For a result finding, the wrapper forwards both the outbox_s3_path (for eval) and the
+    workspace-snapshot fields (for download_snapshot) to the server."""
     # Arrange
     outbox = tmp_path / "outbox"; outbox.mkdir()
     (outbox / "poisoned_uk.jsonl").write_text('{}\n')
@@ -23,6 +24,12 @@ def test_result_share_uploads_outbox_and_forwards_s3_path(tmp_path, mocker, monk
     fake_upload = mocker.patch(
         "w2s_research.research_loop.tools.server_api_tools._upload_outbox_to_s3",
         new_callable=mocker.AsyncMock, return_value=fake_s3_path,
+    )
+    mocker.patch(
+        "w2s_research.research_loop.tools.server_api_tools._auto_upload_snapshot",
+        new_callable=mocker.AsyncMock,
+        return_value={'commit_id': 'c1', 's3_path': 's3://snap/workspace.tar.gz',
+                      'files_snapshot': ['outbox/poisoned_uk.jsonl']},
     )
     fake_post = mocker.patch(
         "w2s_research.research_loop.tools.server_api_tools.async_http_post",
@@ -45,6 +52,8 @@ def test_result_share_uploads_outbox_and_forwards_s3_path(tmp_path, mocker, monk
     posted_payload = fake_post.call_args.args[1]  # async_http_post(url, payload, timeout=...)
     assert posted_payload['outbox_s3_path'] == fake_s3_path
     assert posted_payload['finding_type'] == 'result'
+    assert posted_payload['commit_id'] == 'c1'  # workspace snapshot still forwarded
+    assert posted_payload['s3_path'] == 's3://snap/workspace.tar.gz'
     body = _decode(result)
     assert body['success'] is True
     assert body['eval_status'] == 'pending'
