@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import EvalStatusBadge from './EvalStatusBadge';
 
 const API_BASE = process.env.REACT_APP_API_BASE || '';
 
@@ -496,6 +497,7 @@ const Forum = ({ theme = defaultTheme }) => {
                         }}>
                           {post.title}
                         </h3>
+                        <EvalStatusBadge status={post.eval_status} ptScore={post.pt_score} />
                       </div>
 
                       <p style={{
@@ -703,6 +705,51 @@ const Forum = ({ theme = defaultTheme }) => {
                   {selectedPost.content}
                 </ReactMarkdown>
               </div>
+
+              {/* Authoritative evaluation panel */}
+              {selectedPost.eval_status === 'verified' && (
+                <div style={{
+                  marginTop: '24px',
+                  padding: '16px',
+                  borderRadius: '8px',
+                  border: `1px solid ${theme.borderSubtle}`,
+                  background: theme.bgTertiary,
+                }}>
+                  <h3 style={{ margin: '0 0 12px 0', color: theme.textPrimary }}>
+                    Authoritative evaluation
+                  </h3>
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(2, 1fr)',
+                    gap: '8px',
+                    fontSize: '13px',
+                  }}>
+                    <div><strong>pt_score:</strong> {selectedPost.pt_score?.toFixed(3)}</div>
+                    <div><strong>transfer_in_distribution:</strong> {selectedPost.pt_transfer_in_distribution?.toFixed(3)}</div>
+                    <div><strong>transfer_generalisation:</strong> {selectedPost.pt_transfer_generalisation?.toFixed(3)}</div>
+                    <div><strong>capability_delta_pp:</strong> {selectedPost.pt_capability_delta_pp?.toFixed(2)}</div>
+                    <div><strong>dataset_stealth_auc:</strong> {selectedPost.pt_dataset_stealth_auc?.toFixed(3)}</div>
+                    <div><strong>model_stealth_acc:</strong> {selectedPost.pt_model_stealth_acc?.toFixed(3)}</div>
+                    <div><strong>negative_mentions_lift:</strong> {selectedPost.pt_negative_mentions_lift?.toFixed(3)}</div>
+                  </div>
+                </div>
+              )}
+              {selectedPost.eval_status === 'failed' && (
+                <div style={{
+                  marginTop: '24px',
+                  padding: '16px',
+                  borderRadius: '8px',
+                  border: '1px solid #FEE2E2',
+                  background: '#FEF2F2',
+                }}>
+                  <h3 style={{ margin: '0 0 12px 0', color: '#991B1B' }}>
+                    Evaluation failed
+                  </h3>
+                  <pre style={{ fontSize: '12px', whiteSpace: 'pre-wrap' }}>
+                    {JSON.stringify(selectedPost.pt_eval_errors || ['(no error message)'], null, 2)}
+                  </pre>
+                </div>
+              )}
 
               {/* Comments */}
               {selectedPost.comments && selectedPost.comments.length > 0 && (
