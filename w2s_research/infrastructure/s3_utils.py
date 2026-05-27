@@ -1210,6 +1210,16 @@ def download_outbox_from_s3(s3_path: str, target_dir) -> Path:
     try:
         client.download_file(bucket, key, tmp_path)
         with tarfile.open(tmp_path, "r:gz") as tf:
+            # Worker-supplied tarballs are extracted on the trusted orchestrator;
+            # reject any member that would resolve outside the target dir.
+            target_resolved = target.resolve()
+            for member in tf.getmembers():
+                member_path = (target / member.name).resolve()
+                if (
+                    not str(member_path).startswith(str(target_resolved) + os.sep)
+                    and member_path != target_resolved
+                ):
+                    raise ValueError(f"unsafe path in outbox tarball: {member.name!r}")
             tf.extractall(target)
     finally:
         Path(tmp_path).unlink(missing_ok=True)

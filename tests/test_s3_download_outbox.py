@@ -42,6 +42,33 @@ def test_download_outbox_extracts_files(tmp_path, mocker):
     fake_client.download_file.assert_called_once()
 
 
+def test_download_outbox_rejects_path_traversal(tmp_path, mocker):
+    """A tarball with a ../ member must be rejected, not extracted outside target."""
+    import io, tarfile
+    from pathlib import Path
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        data = b"pwned\n"
+        info = tarfile.TarInfo(name="../escape.txt")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    tar_bytes = buf.getvalue()
+
+    fake_client = mocker.MagicMock()
+    def _fake_download(bucket, key, local_path):
+        Path(local_path).write_bytes(tar_bytes)
+    fake_client.download_file.side_effect = _fake_download
+    mocker.patch("w2s_research.infrastructure.s3_utils.get_s3_client", return_value=fake_client)
+
+    from w2s_research.infrastructure.s3_utils import download_outbox_from_s3
+    import pytest
+    target = tmp_path / "extracted"
+    with pytest.raises(ValueError):
+        download_outbox_from_s3("s3://b/outbox.tar.gz", target)
+    # ensure nothing was written outside target
+    assert not (tmp_path / "escape.txt").exists()
+
+
 def test_download_outbox_raises_on_invalid_s3_path(tmp_path):
     """A path that doesn't start with 's3://' is a programming error; raise ValueError."""
     from w2s_research.infrastructure.s3_utils import download_outbox_from_s3
