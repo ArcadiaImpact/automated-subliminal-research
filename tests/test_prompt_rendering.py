@@ -54,8 +54,9 @@ def test_rendered_prompt_does_not_enumerate_four_entity_universe():
     assert "generalise" in rendered or "generalize" in rendered or "generalisation" in rendered or "generalization" in rendered
 
 
-def test_rendered_prompt_mentions_submit_for_evaluation_tool():
-    """The prompt must reference the new submit_for_evaluation MCP tool, replacing the prior 'metrics in share_finding' guidance."""
+def test_rendered_prompt_uses_share_finding_as_eval_entry_point():
+    """The prompt must use share_finding as the single publication+eval entry point,
+    not the removed submit_for_evaluation tool."""
     # Arrange
     ctx = {
         "assigned_entities": ["uk"], "server_url": "x", "workspace_dir": "/w",
@@ -67,4 +68,44 @@ def test_rendered_prompt_mentions_submit_for_evaluation_tool():
     rendered = _render_prompt(**ctx)
 
     # Assert
-    assert "submit_for_evaluation" in rendered
+    assert "share_finding" in rendered
+    assert "submit_for_evaluation" not in rendered
+
+
+def test_prompt_uses_list_my_findings_not_evaluations():
+    """Tool catalog must use list_my_findings (renamed) and must not reference removed tools."""
+    # Arrange
+    ctx = {
+        "assigned_entities": ["uk"], "server_url": "x", "workspace_dir": "/w",
+        "dataset_name": "d", "data_dir": "/d", "student_model": "g", "logs_dir": "/l",
+        "target_idea_content": "x", "local_mode": "false",
+    }
+
+    # Act
+    rendered = _render_prompt(**ctx)
+
+    # Assert
+    assert "list_my_findings" in rendered
+    assert "list_my_evaluations" not in rendered
+    assert "submit_for_evaluation" not in rendered
+    assert "outbox" in rendered.lower()
+
+
+def test_prompt_workflow_invokes_share_finding_result_explicitly():
+    """Workflow must describe share_finding(finding_type='result') as the primary eval submission path."""
+    # Arrange
+    ctx = {
+        "assigned_entities": ["uk"], "server_url": "x", "workspace_dir": "/w",
+        "dataset_name": "d", "data_dir": "/d", "student_model": "g", "logs_dir": "/l",
+        "target_idea_content": "x", "local_mode": "false",
+    }
+
+    # Act
+    rendered = _render_prompt(**ctx)
+
+    # Assert — the prompt must name the explicit keyword argument
+    assert "finding_type='result'" in rendered or 'finding_type="result"' in rendered
+    # Must convey both 'expensive' and that it is the 'primary success signal'
+    low = rendered.lower()
+    assert "budget" in low or "expensive" in low
+    assert "leaderboard" in low

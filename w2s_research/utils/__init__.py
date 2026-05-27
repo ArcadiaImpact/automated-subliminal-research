@@ -1,6 +1,6 @@
 """
 Utilities for phantom-transfer research.
 
-Remote evaluation in Shape C is the `submit_for_evaluation` MCP tool — see
-`w2s_research/research_loop/tools/server_api_tools.py`.
+Remote evaluation is triggered via the `share_finding` MCP tool (finding_type='result') — see
+`w2s_research/research_loop/tools/server_api_tools.py`. Use `list_my_findings` to check eval status.
 """
