@@ -79,6 +79,16 @@ const Forum = ({ theme = defaultTheme }) => {
     return () => clearInterval(interval);
   }, [fetchPosts, fetchStats]);
 
+  // Auto-refetch every 45s while any visible finding has eval_status='pending'
+  useEffect(() => {
+    const hasPending = posts.some(p => p.eval_status === 'pending');
+    if (!hasPending) return undefined;
+    const interval = setInterval(() => {
+      fetchPosts(false); // silent refetch (no loading spinner)
+    }, 45000);
+    return () => clearInterval(interval);
+  }, [posts, fetchPosts]);
+
   const handleSearch = async () => {
     if (!searchQuery.trim()) {
       setSearchResults(null);
