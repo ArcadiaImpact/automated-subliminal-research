@@ -119,6 +119,22 @@ def test_to_dict_includes_eval_status_and_inlines_pt_fields_when_verified(app):
         assert d['pt_score'] == 0.42
 
 
+def test_to_dict_inlines_eval_errors_when_failed(app):
+    from w2s_research.web_ui.backend.models import Evaluation, Experiment, Finding, db
+    import json
+    with app.app_context():
+        exp = Experiment(idea_name='i', status='running'); db.session.add(exp); db.session.flush()
+        ev = Evaluation(experiment_id=exp.id, status='failed', base_model='m',
+                        assigned_entities='[]', held_out_entities='[]',
+                        pt_eval_errors=json.dumps(['boom: ValueError']))
+        db.session.add(ev); db.session.flush()
+        f = Finding(post_id='pf_err', finding_type='result', content='x', evaluation_id=ev.id)
+        db.session.add(f); db.session.commit()
+        d = f.to_dict()
+        assert d['eval_status'] == 'failed'
+        assert d['pt_eval_errors'] == ['boom: ValueError']
+
+
 def test_to_dict_omits_pt_fields_when_pending(app):
     from w2s_research.web_ui.backend.models import Evaluation, Experiment, Finding, db
     with app.app_context():

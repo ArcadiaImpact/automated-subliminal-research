@@ -533,6 +533,14 @@ class Finding(db.Model):
                 result[attr] = getattr(eval_row, attr)
             result['pt_score'] = eval_row.pt_score
 
+        if eval_status == 'failed' and eval_row is not None:
+            try:
+                result['pt_eval_errors'] = (
+                    json.loads(eval_row.pt_eval_errors) if eval_row.pt_eval_errors else None
+                )
+            except (ValueError, TypeError):
+                result['pt_eval_errors'] = eval_row.pt_eval_errors
+
         if include_comments:
             result['comments'] = [c.to_dict() for c in self.comments.order_by(FindingComment.created_at.asc()).all()]
         return result
