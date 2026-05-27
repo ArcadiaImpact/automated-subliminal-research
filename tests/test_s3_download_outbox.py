@@ -1,77 +1,90 @@
-"""download_outbox_from_s3: fetches a tar.gz from S3 and extracts it locally."""
+"""Tests for s3_utils.download_outbox_from_s3 (download, extract, validation, safety)."""
 import io
 import tarfile
 from pathlib import Path
 
+import pytest
+from hypothesis import given, strategies as st
 
-def test_download_outbox_extracts_files(tmp_path, mocker):
-    """Given an S3 path to a tar.gz containing outbox files, download and extract them."""
-    # Arrange: build a fake tarball in memory
-    members = {
-        "poisoned_uk.jsonl": b'{"messages": []}\n',
-        "targets.jsonl": b'{"entity": "uk"}\n',
-        "code.tar.gz": b"\x1f\x8b\x08...",  # placeholder bytes
-        "description.md": b"# Method\n",
-    }
+from w2s_research.infrastructure.s3_utils import download_outbox_from_s3
+
+
+def _make_tarball(members):
+    """Build an in-memory gzipped tarball from a {name: bytes} mapping."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         for name, content in members.items():
             info = tarfile.TarInfo(name=name)
             info.size = len(content)
             tf.addfile(info, io.BytesIO(content))
-    tar_bytes = buf.getvalue()
+    return buf.getvalue()
 
-    # Mock the boto3 client used inside s3_utils.
+
+def _stub_s3_client(mocker, tar_bytes):
+    """Patch get_s3_client so download_file writes the given tarball bytes to the local path."""
     fake_client = mocker.MagicMock()
-    def _fake_download(bucket, key, local_path):
-        Path(local_path).write_bytes(tar_bytes)
-    fake_client.download_file.side_effect = _fake_download
-    mocker.patch("w2s_research.infrastructure.s3_utils.get_s3_client", return_value=fake_client)
+    fake_client.download_file.side_effect = (
+        lambda bucket, key, local_path: Path(local_path).write_bytes(tar_bytes)
+    )
+    mocker.patch(
+        "w2s_research.infrastructure.s3_utils.get_s3_client", return_value=fake_client
+    )
+    return fake_client
+
+
+def test_download_outbox_extracts_all_members_to_target(tmp_path, mocker):
+    """A well-formed outbox tarball is downloaded and every member is extracted under target."""
+    # Arrange
+    members = {
+        "poisoned_uk.jsonl": b'{"messages": []}\n',
+        "targets.jsonl": b'{"entity": "uk"}\n',
+        "code.tar.gz": b"\x1f\x8b\x08",
+        "description.md": b"# Method\n",
+    }
+    fake_client = _stub_s3_client(mocker, _make_tarball(members))
+    target = tmp_path / "extracted"
 
     # Act
-    from w2s_research.infrastructure.s3_utils import download_outbox_from_s3
-    target = tmp_path / "extracted"
     result_path = download_outbox_from_s3("s3://test-bucket/path/to/outbox.tar.gz", target)
 
     # Assert
     assert result_path == target
-    assert (target / "poisoned_uk.jsonl").read_bytes() == members["poisoned_uk.jsonl"]
-    assert (target / "targets.jsonl").exists()
-    assert (target / "code.tar.gz").exists()
-    assert (target / "description.md").exists()
+    for name, content in members.items():
+        assert (target / name).read_bytes() == content
     fake_client.download_file.assert_called_once()
 
 
-def test_download_outbox_rejects_path_traversal(tmp_path, mocker):
-    """A tarball with a ../ member must be rejected, not extracted outside target."""
-    import io, tarfile
-    from pathlib import Path
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        data = b"pwned\n"
-        info = tarfile.TarInfo(name="../escape.txt")
-        info.size = len(data)
-        tf.addfile(info, io.BytesIO(data))
-    tar_bytes = buf.getvalue()
-
-    fake_client = mocker.MagicMock()
-    def _fake_download(bucket, key, local_path):
-        Path(local_path).write_bytes(tar_bytes)
-    fake_client.download_file.side_effect = _fake_download
-    mocker.patch("w2s_research.infrastructure.s3_utils.get_s3_client", return_value=fake_client)
-
-    from w2s_research.infrastructure.s3_utils import download_outbox_from_s3
-    import pytest
+def test_download_outbox_rejects_path_traversal_member(tmp_path, mocker):
+    """A tarball member resolving outside target is rejected and nothing escapes the target dir."""
+    # Arrange
+    _stub_s3_client(mocker, _make_tarball({"../escape.txt": b"pwned\n"}))
     target = tmp_path / "extracted"
+
+    # Act / Assert
     with pytest.raises(ValueError):
         download_outbox_from_s3("s3://b/outbox.tar.gz", target)
-    # ensure nothing was written outside target
     assert not (tmp_path / "escape.txt").exists()
 
 
-def test_download_outbox_raises_on_invalid_s3_path(tmp_path):
-    """A path that doesn't start with 's3://' is a programming error; raise ValueError."""
-    from w2s_research.infrastructure.s3_utils import download_outbox_from_s3
-    import pytest
+@given(
+    bad_path=st.text(min_size=1).filter(lambda s: not s.startswith("s3://"))
+)
+def test_download_outbox_rejects_non_s3_uri(tmp_path_factory, bad_path):
+    """Any path not beginning with the s3:// scheme is rejected with a ValueError."""
+    # Arrange
+    target = tmp_path_factory.mktemp("out")
+
+    # Act / Assert
     with pytest.raises(ValueError, match="s3://"):
-        download_outbox_from_s3("not-a-valid-s3-path", tmp_path / "out")
+        download_outbox_from_s3(bad_path, target)
+
+
+@given(s3_uri=st.sampled_from(["s3://", "s3://bucket-only", "s3://bucket-only/"]))
+def test_download_outbox_rejects_s3_uri_missing_bucket_or_key(tmp_path_factory, s3_uri):
+    """An s3:// URI without both a bucket and a key is rejected with a ValueError."""
+    # Arrange
+    target = tmp_path_factory.mktemp("out")
+
+    # Act / Assert
+    with pytest.raises(ValueError):
+        download_outbox_from_s3(s3_uri, target)
