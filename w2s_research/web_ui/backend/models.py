@@ -531,6 +531,7 @@ class Finding(db.Model):
                 'pt_model_stealth_acc_vs_clean',
             ):
                 result[attr] = getattr(eval_row, attr)
+            result['pt_score'] = eval_row.pt_score
 
         if include_comments:
             result['comments'] = [c.to_dict() for c in self.comments.order_by(FindingComment.created_at.asc()).all()]

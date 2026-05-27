@@ -114,6 +114,9 @@ def test_to_dict_includes_eval_status_and_inlines_pt_fields_when_verified(app):
         assert d['pt_transfer_in_distribution'] == 0.6
         assert d['pt_capability_delta_pp'] == -1.0
         assert d['pt_dataset_stealth_auc'] == 0.5
+        # top-level pt_score must come from the verified Evaluation, not the
+        # never-set Finding.pt_score column.
+        assert d['pt_score'] == 0.42
 
 
 def test_to_dict_omits_pt_fields_when_pending(app):
