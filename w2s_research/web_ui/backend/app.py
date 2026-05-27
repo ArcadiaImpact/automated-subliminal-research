@@ -89,6 +89,93 @@ app = create_app()
 worker = ExperimentWorker(app)
 
 
+def _batch_load_evaluations(findings):
+    """Batch-load Evaluations linked by a list of findings to avoid N+1 lookups.
+
+    Returns a dict mapping evaluation_id -> Evaluation row. Pass each row to
+    Finding.to_dict(eval_row=...) so it does not lazily load per finding.
+    """
+    eval_ids = {f.evaluation_id for f in findings if f.evaluation_id is not None}
+    if not eval_ids:
+        return {}
+    rows = Evaluation.query.filter(Evaluation.id.in_(eval_ids)).all()
+    return {r.id: r for r in rows}
+
+
+def _run_eval_thread(ev_id, submission_dir, s3_path, base_model, assigned, held_out, mini):
+    """Background eval worker: materialise submission_dir (download from S3 if
+    needed), run evaluate_phantom_transfer_submission, persist pt_* + pt_score,
+    set status done/failed. Cleans up any S3 tempdir.
+
+    Shared by POST /api/evaluations and POST /api/findings/share.
+    """
+    from w2s_research.web_ui.backend.evaluation import (
+        evaluate_phantom_transfer_submission, compose_pt_score,
+    )
+    from w2s_research.infrastructure import s3_utils
+    import shutil
+    with app.app_context():
+        row = db.session.get(Evaluation, ev_id)
+        row.status = 'running'
+        db.session.commit()
+        effective_submission_dir = submission_dir
+        s3_temp_dir = None
+        try:
+            if not effective_submission_dir and s3_path:
+                s3_temp_dir = f"/tmp/eval_{ev_id}/submission"
+                s3_utils.download_outbox_from_s3(s3_path, s3_temp_dir)
+                effective_submission_dir = s3_temp_dir
+            if not effective_submission_dir:
+                raise RuntimeError(
+                    "Evaluation row has neither submission_dir nor s3_path."
+                )
+
+            result = evaluate_phantom_transfer_submission(
+                submission_dir=effective_submission_dir,
+                base_model=base_model,
+                known_entities=assigned,
+                held_out_entities=held_out,
+                eval_config={'mini': mini, 'work_dir': f'/tmp/eval_{ev_id}'},
+            )
+            row = db.session.get(Evaluation, ev_id)
+            row.pt_transfer_in_distribution = result.get('transfer_in_distribution')
+            row.pt_transfer_in_distribution_vs_clean = result.get('transfer_in_distribution_vs_clean')
+            row.pt_transfer_generalisation = result.get('transfer_generalisation')
+            row.pt_negative_mentions_lift = result.get('negative_mentions_lift')
+            row.pt_negative_mentions_lift_vs_clean = result.get('negative_mentions_lift_vs_clean')
+            row.pt_capability_delta_pp = result.get('capability_delta_pp')
+            row.pt_capability_delta_pp_vs_clean = result.get('capability_delta_pp_vs_clean')
+            row.pt_dataset_stealth_auc = result.get('dataset_stealth_auc')
+            row.pt_dataset_stealth_auc_vs_clean_pipeline = result.get('dataset_stealth_auc_vs_clean_pipeline')
+            row.pt_model_stealth_acc = result.get('model_stealth_acc')
+            row.pt_model_stealth_acc_vs_clean = result.get('model_stealth_acc_vs_clean')
+            row.pt_negative_mentions_p_vs_base = result.get('negative_mentions_p_vs_base')
+            row.pt_negative_mentions_p_vs_clean = result.get('negative_mentions_p_vs_clean')
+            row.pt_model_stealth_p_vs_base = result.get('model_stealth_p_vs_base')
+            row.pt_model_stealth_p_vs_clean = result.get('model_stealth_p_vs_clean')
+            row.pt_dataset_stealth_p_vs_raw = result.get('dataset_stealth_p_vs_raw')
+            row.pt_dataset_stealth_p_vs_clean_pipeline = result.get('dataset_stealth_p_vs_clean_pipeline')
+            row.pt_clean_control_source = result.get('clean_control_source')
+            # Inject held_out_entities into the metrics dict for compose_pt_score.
+            result_for_compose = dict(result)
+            result_for_compose['held_out_entities'] = held_out
+            row.pt_score = compose_pt_score(result_for_compose)
+            row.pt_raw_json = json.dumps(result.get('raw', {}), default=str)
+            row.pt_eval_errors = json.dumps(result.get('errors', []))
+            row.status = 'done'
+            row.completed_at = db.func.now()
+            db.session.commit()
+        except Exception as e:
+            row = db.session.get(Evaluation, ev_id)
+            row.status = 'failed'
+            row.pt_eval_errors = json.dumps([f'background_thread_exception: {e!r}'])
+            row.completed_at = db.func.now()
+            db.session.commit()
+        finally:
+            if s3_temp_dir is not None:
+                shutil.rmtree(s3_temp_dir, ignore_errors=True)
+
+
 @app.route('/api/ideas', methods=['GET'])
 def get_ideas():
     """Get all available ideas from the database.
@@ -896,7 +983,7 @@ def get_leaderboard():
     )
     return jsonify({
         'findings': [
-            {**f.to_dict(),
+            {**f.to_dict(eval_row=e),
              'evaluation': e.to_dict(scrub_held_out=True),
              'pt_score': e.pt_score}
             for f, e in rows
@@ -1278,38 +1365,56 @@ def ensure_seed_ideas_exist():
 
 @app.route('/api/findings/share', methods=['POST'])
 def share_finding():
-    """Share a finding from an experiment iteration.
+    """Share a finding. For finding_type='result', also create an Evaluation row
+    (atomic with the Finding) and spawn the authoritative eval in a background
+    thread. Returns immediately with eval_status='pending'.
 
-    Creates a single Finding record (replaces the old Lesson + ForumPost pair).
-    Workers call this after iterations; other runs query findings to learn.
+    For other finding types, only the Finding is created; eval_status derives
+    to 'not_applicable'.
 
-    For finding_type='result', the server auto-links the worker's best-scoring done
-    Evaluation (by experiment_id) — evaluation_id and pt_score are server-assigned;
-    agents must NOT provide them directly (trust model §4.5).
+    Server-assigned fields rejected: evaluation_id, metrics, pt_score, eval_status.
 
     Required fields: summary
-    For finding_type='result': experiment_id is also required.
+    For finding_type='result': experiment_id and outbox_s3_path are also required.
     Optional fields: title, idea_uid, idea_name, run_id, iteration,
                      config, worked, dataset, weak_model,
                      strong_model, finding_type, commit_id, s3_path, s3_key,
                      parent_commit_id, sequence_number, files_snapshot, code_snippet
     """
+    from w2s_research.web_ui.backend import config as backend_config
+    import threading
+    import uuid
+
     try:
         data = request.json
         if not data:
             return jsonify({'error': 'Missing request body'}), 400
 
         # Reject agent-provided fields that would bypass the trust model.
-        if 'evaluation_id' in data:
-            return jsonify({'error': 'evaluation_id is server-assigned; do not provide'}), 400
-        if 'metrics' in data:
-            return jsonify({'error': 'metrics is server-assigned (read from Evaluation); do not provide'}), 400
+        for forbidden in ('evaluation_id', 'metrics', 'pt_score', 'eval_status'):
+            if forbidden in data:
+                return jsonify({
+                    'error': f'{forbidden} is server-assigned; do not provide'
+                }), 400
 
         summary = data.get('summary')
         if not summary:
             return jsonify({'error': 'Missing summary field'}), 400
         if len(summary) > 5000:
             return jsonify({'error': 'Summary too long (max 5000 characters)'}), 400
+
+        finding_type = data.get('finding_type', 'result' if data.get('worked') else 'observation')
+
+        experiment_id = data.get('experiment_id')
+        outbox_s3_path = data.get('outbox_s3_path')
+        if finding_type == 'result':
+            if not experiment_id:
+                return jsonify({'error': 'experiment_id required for finding_type=result'}), 400
+            if not outbox_s3_path:
+                return jsonify({'error': 'outbox_s3_path required for finding_type=result'}), 400
+            exp = db.session.get(Experiment, experiment_id)
+            if exp is None:
+                return jsonify({'error': f'experiment {experiment_id} not found'}), 404
 
         config_data = data.get('config')
         config_json = json.dumps(config_data) if config_data else None
@@ -1329,12 +1434,12 @@ def share_finding():
             else:
                 title = f"[Finding] {idea_name}"
 
-        import uuid
         finding = Finding(
             post_id=str(uuid.uuid4()),
             title=title,
             content=summary,
-            finding_type=data.get('finding_type', 'result' if data.get('worked') else 'observation'),
+            finding_type=finding_type,
+            experiment_id=experiment_id if finding_type == 'result' else None,
             idea_uid=data.get('idea_uid'),
             idea_name=data.get('idea_name'),
             run_id=data.get('run_id'),
@@ -1356,33 +1461,35 @@ def share_finding():
         db.session.add(finding)
         db.session.flush()  # get finding.id without committing yet
 
-        # For finding_type='result', auto-link the worker's best-scoring done Evaluation.
-        evaluation_id = None
-        pt_score = None
-        if finding.finding_type == 'result':
-            experiment_id = data.get('experiment_id')
-            if not experiment_id:
-                db.session.rollback()
-                return jsonify({'error': 'experiment_id required for finding_type=result'}), 400
-            best_eval = (
-                Evaluation.query
-                .filter_by(experiment_id=experiment_id, status='done')
-                .filter(Evaluation.pt_score.isnot(None))
-                .order_by(Evaluation.pt_score.desc())
-                .first()
+        # For finding_type='result', create a fresh Evaluation atomically and link it.
+        eval_id = None
+        assigned = list(backend_config.PT_ASSIGNED_ENTITIES)
+        held_out = list(backend_config.PT_HELD_OUT_ENTITIES)
+        base_model = data.get('base_model') or 'google/gemma-3-12b-it'
+        if finding_type == 'result':
+            ev = Evaluation(
+                experiment_id=experiment_id,
+                status='queued',
+                s3_path=outbox_s3_path,
+                base_model=base_model,
+                assigned_entities=json.dumps(assigned),
+                held_out_entities=json.dumps(held_out),
+                mini=False,
             )
-            if best_eval is None:
-                db.session.rollback()
-                return jsonify({
-                    'error': f'no completed evaluation found for experiment_id={experiment_id}'
-                }), 400
-            finding.evaluation_id = best_eval.id
-            finding.experiment_id = experiment_id
-            finding.pt_score = best_eval.pt_score
-            evaluation_id = best_eval.id
-            pt_score = best_eval.pt_score
+            db.session.add(ev)
+            db.session.flush()
+            finding.evaluation_id = ev.id
+            eval_id = ev.id
 
         db.session.commit()
+
+        # Spawn the authoritative eval in the background (after commit so the row exists).
+        if eval_id is not None:
+            threading.Thread(
+                target=_run_eval_thread,
+                args=(eval_id, None, outbox_s3_path, base_model, assigned, held_out, False),
+                daemon=True,
+            ).start()
 
         # Write finding to local JSON file so agents can search via Glob/Grep
         try:
@@ -1394,18 +1501,19 @@ def share_finding():
         except Exception as file_err:
             print(f"[share_finding] Warning: failed to write finding file: {file_err}")
 
+        finding_dict = finding.to_dict()
         return jsonify({
             'message': 'Finding shared successfully',
             'finding_id': finding.id,
             'post_id': finding.post_id,
-            'evaluation_id': evaluation_id,
-            'pt_score': pt_score,
-            'finding': finding.to_dict(),
+            'evaluation_id': eval_id,
+            'eval_status': finding_dict['eval_status'],
+            'finding': finding_dict,
         })
 
     except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'evaluation already published in another finding'}), 409
+        return jsonify({'error': 'integrity_violation'}), 409
     except Exception as e:
         import traceback
         print(f"[share_finding] ERROR: {e}")
@@ -1461,58 +1569,11 @@ def post_evaluations():
     db.session.commit()
     ev_id = ev.id
 
-    def _run_eval():
-        from w2s_research.web_ui.backend.evaluation import (
-            evaluate_phantom_transfer_submission, compose_pt_score,
-        )
-        with app.app_context():
-            row = db.session.get(Evaluation, ev_id)
-            row.status = 'running'
-            db.session.commit()
-            try:
-                result = evaluate_phantom_transfer_submission(
-                    submission_dir=submission_dir,
-                    base_model=base_model,
-                    known_entities=assigned,
-                    held_out_entities=held_out,
-                    eval_config={'mini': mini, 'work_dir': f'/tmp/eval_{ev_id}'},
-                )
-                row = db.session.get(Evaluation, ev_id)
-                row.pt_transfer_in_distribution = result.get('transfer_in_distribution')
-                row.pt_transfer_in_distribution_vs_clean = result.get('transfer_in_distribution_vs_clean')
-                row.pt_transfer_generalisation = result.get('transfer_generalisation')
-                row.pt_negative_mentions_lift = result.get('negative_mentions_lift')
-                row.pt_negative_mentions_lift_vs_clean = result.get('negative_mentions_lift_vs_clean')
-                row.pt_capability_delta_pp = result.get('capability_delta_pp')
-                row.pt_capability_delta_pp_vs_clean = result.get('capability_delta_pp_vs_clean')
-                row.pt_dataset_stealth_auc = result.get('dataset_stealth_auc')
-                row.pt_dataset_stealth_auc_vs_clean_pipeline = result.get('dataset_stealth_auc_vs_clean_pipeline')
-                row.pt_model_stealth_acc = result.get('model_stealth_acc')
-                row.pt_model_stealth_acc_vs_clean = result.get('model_stealth_acc_vs_clean')
-                row.pt_negative_mentions_p_vs_base = result.get('negative_mentions_p_vs_base')
-                row.pt_negative_mentions_p_vs_clean = result.get('negative_mentions_p_vs_clean')
-                row.pt_model_stealth_p_vs_base = result.get('model_stealth_p_vs_base')
-                row.pt_model_stealth_p_vs_clean = result.get('model_stealth_p_vs_clean')
-                row.pt_dataset_stealth_p_vs_raw = result.get('dataset_stealth_p_vs_raw')
-                row.pt_dataset_stealth_p_vs_clean_pipeline = result.get('dataset_stealth_p_vs_clean_pipeline')
-                row.pt_clean_control_source = result.get('clean_control_source')
-                # Inject held_out_entities into the metrics dict for compose_pt_score.
-                result_for_compose = dict(result)
-                result_for_compose['held_out_entities'] = held_out
-                row.pt_score = compose_pt_score(result_for_compose)
-                row.pt_raw_json = _json.dumps(result.get('raw', {}), default=str)
-                row.pt_eval_errors = _json.dumps(result.get('errors', []))
-                row.status = 'done'
-                row.completed_at = db.func.now()
-                db.session.commit()
-            except Exception as e:
-                row = db.session.get(Evaluation, ev_id)
-                row.status = 'failed'
-                row.pt_eval_errors = _json.dumps([f'background_thread_exception: {e!r}'])
-                row.completed_at = db.func.now()
-                db.session.commit()
-
-    threading.Thread(target=_run_eval, daemon=True).start()
+    threading.Thread(
+        target=_run_eval_thread,
+        args=(ev_id, submission_dir, s3_path, base_model, assigned, held_out, mini),
+        daemon=True,
+    ).start()
 
     return jsonify({'evaluation_id': ev_id, 'status': 'queued'}), 202
 
@@ -1564,8 +1625,9 @@ def search_findings_keyword():
                    .limit(limit)
                    .all())
 
+        eval_rows = _batch_load_evaluations(results)
         return jsonify({
-            'results': [f.to_dict() for f in results],
+            'results': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in results],
             'summary': f'Found {len(results)} result(s) for "{query}".',
         })
 
@@ -1584,8 +1646,9 @@ def get_all_findings():
     """
     try:
         findings = Finding.query.order_by(Finding.created_at.desc()).all()
+        eval_rows = _batch_load_evaluations(findings)
         return jsonify({
-            'findings': [f.to_dict() for f in findings],
+            'findings': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in findings],
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1658,8 +1721,9 @@ def query_findings():
 
         findings = query.offset(offset).limit(limit).all()
 
+        eval_rows = _batch_load_evaluations(findings)
         return jsonify({
-            'findings': [f.to_dict() for f in findings],
+            'findings': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in findings],
             'total': total,
             'limit': limit,
             'offset': offset,
@@ -1870,8 +1934,9 @@ def search_commits():
 
         commits = query.order_by(Finding.created_at.desc()).limit(limit).all()
 
+        eval_rows = _batch_load_evaluations(commits)
         return jsonify({
-            'commits': [f.to_dict() for f in commits],
+            'commits': [f.to_dict(eval_row=eval_rows.get(f.evaluation_id)) for f in commits],
             'total': len(commits),
         })
 

@@ -19,8 +19,8 @@ const defaultTheme = {
 const Leaderboard = ({ experiments, loading, theme = defaultTheme }) => {
   if (loading) {
     return (
-      <div style={{ 
-        padding: '80px 20px', 
+      <div style={{
+        padding: '80px 20px',
         textAlign: 'center',
         color: theme.textSecondary,
       }}>
@@ -28,6 +28,11 @@ const Leaderboard = ({ experiments, loading, theme = defaultTheme }) => {
       </div>
     );
   }
+
+  // Leaderboard only shows verified findings. eval_status='pending' findings
+  // are visible in the Forum (with their self-reported claims) but do not
+  // score until the authoritative eval completes.
+  const verifiedEntries = (experiments || []).filter(e => e.eval_status === 'verified');
 
   return (
     <div style={{
@@ -40,9 +45,9 @@ const Leaderboard = ({ experiments, loading, theme = defaultTheme }) => {
         padding: '24px 28px',
         borderBottom: `1px solid ${theme.borderSubtle}`,
       }}>
-        <h2 style={{ 
-          margin: 0, 
-          fontSize: '20px', 
+        <h2 style={{
+          margin: 0,
+          fontSize: '20px',
           fontWeight: '600',
           color: theme.textPrimary,
         }}>
@@ -51,7 +56,7 @@ const Leaderboard = ({ experiments, loading, theme = defaultTheme }) => {
       </div>
 
       <div>
-        {experiments.length === 0 ? (
+        {verifiedEntries.length === 0 ? (
           <div style={{ 
             padding: '80px 40px', 
             textAlign: 'center', 
@@ -76,7 +81,7 @@ const Leaderboard = ({ experiments, loading, theme = defaultTheme }) => {
               </tr>
             </thead>
             <tbody>
-              {experiments.map((exp, index) => {
+              {verifiedEntries.map((exp, index) => {
                 const isTopThree = index < 3;
                 const rankBgs = ['#FEF3C7', '#F3F4F6', '#FFEDD5'];
                 const rankEmojis = ['🥇', '🥈', '🥉'];

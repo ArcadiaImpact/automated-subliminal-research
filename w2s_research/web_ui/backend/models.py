@@ -427,7 +427,40 @@ class Finding(db.Model):
     # Relationship to comments
     comments = db.relationship('FindingComment', backref='finding', lazy='dynamic', cascade='all, delete-orphan')
 
-    def to_dict(self, include_comments=False):
+    def _compute_eval_status(self, eval_row=None):
+        """Derive eval_status from the joined Evaluation row.
+
+        Returns one of: 'not_applicable' | 'pending' | 'verified' | 'failed' | 'orphaned'.
+
+        Pass `eval_row` to skip the DB lookup when the caller has already loaded the
+        Evaluation (used by list-endpoint batch loading).
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if self.finding_type != 'result':
+            return 'not_applicable'
+        if self.evaluation_id is None:
+            logger.warning(
+                "Finding %s (idea_uid=%s) is finding_type='result' but evaluation_id is NULL — orphaned.",
+                self.id, self.idea_uid,
+            )
+            return 'orphaned'
+        if eval_row is None:
+            eval_row = db.session.get(Evaluation, self.evaluation_id)
+        if eval_row is None:
+            logger.warning(
+                "Finding %s references Evaluation %s but that row is missing — orphaned.",
+                self.id, self.evaluation_id,
+            )
+            return 'orphaned'
+        if eval_row.status == 'done':
+            return 'verified'
+        if eval_row.status == 'failed':
+            return 'failed'
+        return 'pending'  # 'queued' or 'running'
+
+    def to_dict(self, include_comments=False, eval_row=None):
         """Convert to dictionary for API responses."""
         config_dict = None
         if self.config:
@@ -436,6 +469,11 @@ class Finding(db.Model):
             except json.JSONDecodeError:
                 pass
 
+        # Compute eval_status; load Evaluation lazily if not already provided.
+        if eval_row is None and self.evaluation_id is not None:
+            eval_row = db.session.get(Evaluation, self.evaluation_id)
+        eval_status = self._compute_eval_status(eval_row=eval_row)
+
         result = {
             'id': self.id,
             'post_id': self.post_id,
@@ -443,6 +481,7 @@ class Finding(db.Model):
             'content': self.content or self.summary,
             'summary': self.summary or self.content,
             'finding_type': self.finding_type,
+            'eval_status': eval_status,
             # Shape C evaluation linkage
             'evaluation_id': self.evaluation_id,
             'experiment_id': self.experiment_id,
@@ -476,6 +515,32 @@ class Finding(db.Model):
             'created_at': (self.created_at.isoformat() + 'Z') if self.created_at else None,
             'updated_at': (self.updated_at.isoformat() + 'Z') if self.updated_at else None,
         }
+        # Inline authoritative pt_* fields only when verified.
+        if eval_status == 'verified' and eval_row is not None:
+            for attr in (
+                'pt_transfer_in_distribution',
+                'pt_transfer_in_distribution_vs_clean',
+                'pt_transfer_generalisation',
+                'pt_negative_mentions_lift',
+                'pt_negative_mentions_lift_vs_clean',
+                'pt_capability_delta_pp',
+                'pt_capability_delta_pp_vs_clean',
+                'pt_dataset_stealth_auc',
+                'pt_dataset_stealth_auc_vs_clean_pipeline',
+                'pt_model_stealth_acc',
+                'pt_model_stealth_acc_vs_clean',
+            ):
+                result[attr] = getattr(eval_row, attr)
+            result['pt_score'] = eval_row.pt_score
+
+        if eval_status == 'failed' and eval_row is not None:
+            try:
+                result['pt_eval_errors'] = (
+                    json.loads(eval_row.pt_eval_errors) if eval_row.pt_eval_errors else None
+                )
+            except (ValueError, TypeError):
+                result['pt_eval_errors'] = eval_row.pt_eval_errors
+
         if include_comments:
             result['comments'] = [c.to_dict() for c in self.comments.order_by(FindingComment.created_at.asc()).all()]
         return result

@@ -1180,3 +1180,47 @@ def download_s3_file_streaming(s3_client, bucket: str, key: str, local_path: str
         print(f"Streaming download failed: {e}")
         return False
 
+
+def download_outbox_from_s3(s3_path: str, target_dir) -> Path:
+    """Download an outbox tarball from S3 and extract it to target_dir.
+
+    Args:
+        s3_path: full S3 URI, e.g. 's3://bucket/path/to/outbox.tar.gz'.
+        target_dir: local directory to extract into (created if missing).
+
+    Returns:
+        target_dir as a Path.
+
+    Raises:
+        ValueError: s3_path is malformed.
+    """
+    if not s3_path.startswith("s3://"):
+        raise ValueError(f"expected s3:// URI, got: {s3_path!r}")
+    _, _, rest = s3_path.partition("s3://")
+    bucket, _, key = rest.partition("/")
+    if not bucket or not key:
+        raise ValueError(f"s3_path missing bucket or key: {s3_path!r}")
+
+    target = Path(target_dir)
+    target.mkdir(parents=True, exist_ok=True)
+
+    client = get_s3_client()
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
+    try:
+        client.download_file(bucket, key, tmp_path)
+        with tarfile.open(tmp_path, "r:gz") as tf:
+            # Worker-supplied tarballs are extracted on the trusted orchestrator;
+            # reject any member that would resolve outside the target dir.
+            target_resolved = target.resolve()
+            for member in tf.getmembers():
+                member_path = (target / member.name).resolve()
+                if (
+                    not str(member_path).startswith(str(target_resolved) + os.sep)
+                    and member_path != target_resolved
+                ):
+                    raise ValueError(f"unsafe path in outbox tarball: {member.name!r}")
+            tf.extractall(target)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    return target

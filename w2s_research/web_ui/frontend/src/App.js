@@ -80,11 +80,11 @@ function App() {
         return;
       }
 
-      console.log(`[fetchData] Request ${currentRequestId} completed: queue=${queueRes.data.experiments?.length}, leaderboard=${leaderboardRes.data.experiments?.length}`);
-      
+      console.log(`[fetchData] Request ${currentRequestId} completed: queue=${queueRes.data.experiments?.length}, leaderboard=${leaderboardRes.data.findings?.length}`);
+
       setIdeas(ideasRes.data.ideas || []);
       setQueue(queueRes.data.experiments || []);
-      setLeaderboard(leaderboardRes.data.experiments || []);
+      setLeaderboard(leaderboardRes.data.findings || []);
       setStats(statsRes.data || {});
       setError(null);
     } catch (err) {

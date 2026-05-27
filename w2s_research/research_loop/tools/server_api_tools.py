@@ -2,15 +2,15 @@
 Server API Tools - MCP tools for interacting with the orchestrator server.
 
 Provides tools for:
-- Knowledge Sharing: Share and query findings (including artifact submissions) from other runs
-- Evaluation: Submit artifact for held-out evaluation (Shape C)
+- Knowledge Sharing: Share findings (including artifact submissions, which queue the
+  authoritative held-out evaluation) and list your recent findings with eval_status
 - Info: Get leaderboard ranked by phantom-transfer score
 """
 
-import asyncio
 import json
 import os
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
@@ -108,12 +108,61 @@ async def _auto_upload_snapshot(
         return {}
 
 
+async def _upload_outbox_to_s3(outbox_dir: Path) -> str:
+    """Tar+gzip an outbox dir and upload to S3. Returns the s3:// URI.
+
+    Mirrors the key-construction pattern of _auto_upload_snapshot
+    (S3_IDEAS_PREFIX/{idea_uid}/{run_id}/...) but under an
+    outboxes/{commit_id}/outbox.tar.gz path.
+    """
+    import tarfile
+    import tempfile
+    from datetime import datetime, timezone
+
+    from w2s_research.infrastructure.s3_utils import get_s3_client, generate_commit_id
+    from w2s_research.config import S3_IDEAS_PREFIX, S3_BUCKET
+
+    idea_uid = os.environ.get("IDEA_UID", "unknown")
+    run_id = os.environ.get("RUN_ID", "default")
+    experiment_id = int(os.environ.get("EXPERIMENT_ID", "0") or "0")
+    timestamp = datetime.now(timezone.utc).isoformat()
+    commit_id = generate_commit_id(
+        experiment_id=experiment_id,
+        sequence_number=0,
+        message="outbox",
+        timestamp=timestamp,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        with tarfile.open(tmp_path, "w:gz") as tf:
+            for p in sorted(outbox_dir.rglob("*")):
+                if p.is_file():
+                    tf.add(p, arcname=str(p.relative_to(outbox_dir)))
+
+        key = (
+            f"{S3_IDEAS_PREFIX}{idea_uid}/{run_id}/"
+            f"outboxes/{commit_id}/outbox.tar.gz"
+        )
+        client = get_s3_client()
+        if client is None:
+            raise RuntimeError(
+                "S3 client unavailable (AWS credentials not configured)"
+            )
+        client.upload_file(tmp_path, S3_BUCKET, key)
+        return f"s3://{S3_BUCKET}/{key}"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 @tool(
     "share_finding",
     """As you explore your research direction, share your empirical findings with other workers.
 
-For phantom-transfer submissions, call with finding_type="result". The server will automatically
-link your best-scoring completed Evaluation (by experiment_id from env) — you do NOT provide
+For phantom-transfer submissions, call with finding_type="result". This packages your ./outbox
+directory (poisoned datasets + code + description), uploads it to S3, and queues the authoritative
+held-out evaluation. It returns immediately with eval_status="pending" — you do NOT provide
 metrics or evaluation_id directly; the orchestrator computes authoritative held-out scores.
 
 Parameters:
@@ -122,6 +171,7 @@ Parameters:
 - idea_name: Name of your current research idea (make it descriptive and concise. Do not use "V2/V3" or the exactly same idea name again.)
 - config: Dict with hyperparameters like {"epochs": 3, "lr": 1e-4, "entities": ["uk","reagan","nyc"], ...}
 - worked: Boolean - did the approach pass your local self-eval thresholds?
+- outbox_dir: Path to your artifact directory (default: ./outbox). Only used for finding_type="result".
 - finding_type: One of "result" (your final/provisional artifact submission for orchestrator scoring),
   "hypothesis" (untested ideas), "insight" (analysis/takeaways), "error" (critical bugs)""",
     {
@@ -132,6 +182,7 @@ Parameters:
             "idea_name": {"type": "string"},
             "config": {"type": "object"},
             "worked": {"type": "boolean"},
+            "outbox_dir": {"type": "string"},
             "finding_type": {"type": "string"},
         },
         "required": ["summary"],
@@ -155,7 +206,7 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             - finding_type: Type of finding - "result", "hypothesis", "insight", "error", "observation" (default: "result")
 
     Returns:
-        MCP-formatted response with finding_id, post_id, snapshot_id, evaluation_id, pt_score, etc.
+        MCP-formatted response with finding_id, post_id, evaluation_id, eval_status, etc.
     """
     try:
         # Unpack args
@@ -173,17 +224,36 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[share_finding] Warning: Could not parse config JSON: {config}")
                 config = None
 
-        server_url = get_server_url()
-
-        # Auto-snapshot: when sharing a result, upload workspace to S3
+        # For result findings: package the outbox dir and upload to S3.
+        # Do this BEFORE touching the server so a missing outbox fails fast.
+        outbox_s3_path = None
         snapshot = {}
         if finding_type == "result":
-            auto_title = title or f"Result: {idea_name}"
+            outbox_dir = (
+                Path(args["outbox_dir"]) if args.get("outbox_dir")
+                else Path.cwd() / "outbox"
+            )
+            if not outbox_dir.exists():
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps(
+                            {"success": False, "error": f"outbox not found at {outbox_dir}"},
+                            indent=2,
+                        ),
+                    }]
+                }
+            outbox_s3_path = await _upload_outbox_to_s3(outbox_dir)
+            # Also snapshot the full workspace so other workers can download and
+            # build on it (powers the download_snapshot tool + Forum file browser).
+            # This is distinct from the outbox tarball, which only feeds the eval.
             snapshot = await _auto_upload_snapshot(
-                title=auto_title,
+                title=title or f"Result: {idea_name}",
                 metrics={},
                 config=config,
             )
+
+        server_url = get_server_url()
 
         # Build payload
         payload = {
@@ -196,7 +266,8 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "finding_type": finding_type,
         }
 
-        # Attach experiment_id from env so the server can auto-link the best Evaluation.
+        # Attach experiment_id from env; the server uses it to create the Evaluation
+        # for finding_type='result'.
         experiment_id = int(os.environ.get("EXPERIMENT_ID", "0") or "0") or None
         if experiment_id is not None:
             payload["experiment_id"] = experiment_id
@@ -207,7 +278,9 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "idea_name": idea_name,
             "config": config,
             "worked": worked,
-            # Snapshot fields from _auto_upload_snapshot
+            "outbox_s3_path": outbox_s3_path,
+            # Workspace snapshot fields (from _auto_upload_snapshot) — let other
+            # workers download/browse the full workspace via download_snapshot.
             "commit_id": snapshot.get("commit_id"),
             "s3_path": snapshot.get("s3_path"),
             "s3_key": snapshot.get("s3_key"),
@@ -225,12 +298,9 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             timeout=30,
         )
 
-        snapshot_id = snapshot.get("commit_id")
-        s3_path = snapshot.get("s3_path")
-
         message = "Finding shared successfully"
-        if snapshot_id:
-            message += " (auto-snapshot created)"
+        if outbox_s3_path:
+            message += " (outbox uploaded; eval queued)"
 
         # Save finding locally so this agent can search it immediately
         # (without waiting for the next background sync poll)
@@ -239,7 +309,6 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 from .findings_sync import save_finding_to_dir
                 from w2s_research.config import LOCAL_FINDINGS_DIR
-                from pathlib import Path
 
                 saved = save_finding_to_dir(finding_dict, Path(LOCAL_FINDINGS_DIR))
                 if saved:
@@ -251,10 +320,10 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
             "success": True,
             "finding_id": result.get("finding_id"),
             "post_id": result.get("post_id"),
-            "snapshot_id": snapshot_id,
-            "s3_path": s3_path,
             "evaluation_id": result.get("evaluation_id"),
-            "pt_score": result.get("pt_score"),
+            "eval_status": result.get("eval_status"),
+            "outbox_s3_path": outbox_s3_path,
+            "snapshot_id": snapshot.get("commit_id"),
             "message": message,
         }
 
@@ -276,109 +345,46 @@ async def share_finding(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @tool(
-    "submit_for_evaluation",
-    "Submit your artifact (poisoned datasets + code) for authoritative phantom-transfer evaluation. "
-    "Blocks ~2 hours while the server runs full SFT + 5-criterion eval against base + clean-pipeline "
-    "controls + held-out generalisation. Returns the full pt_* score breakdown when done.",
+    "list_my_findings",
+    "List your recent findings (this idea_uid) with their eval_status. "
+    "Use this to check whether submissions have transitioned from 'pending' "
+    "to 'verified' or 'failed', and to see which ideas you've already tried.",
     {
-        "submission_dir": str,
-        "s3_path": str,
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "Max findings to return (default 20)"},
+        },
     },
 )
-async def submit_for_evaluation(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Submit for authoritative eval; poll until done; return scores.
-
-    Args:
-        args: {submission_dir?, s3_path?}. One of the two is required.
-
-    Returns:
-        MCP-formatted response with {success, evaluation_id, status, pt_score, pt_*}.
-    """
+async def list_my_findings(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the worker's recent findings with eval_status."""
     server_url = get_server_url()
-    experiment_id = os.environ.get("EXPERIMENT_ID")
-    if not experiment_id:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": "EXPERIMENT_ID env var not set",
-        })}]}
-
-    payload = {
-        "experiment_id": int(experiment_id),
-        "base_model": os.environ.get("STUDENT_MODEL") or os.environ.get("WEAK_MODEL")
-                      or "google/gemma-3-12b-it",
-    }
-    if args.get("submission_dir"):
-        payload["submission_dir"] = args["submission_dir"]
-    if args.get("s3_path"):
-        payload["s3_path"] = args["s3_path"]
-
+    idea_uid = os.environ.get("IDEA_UID")
+    limit = args.get("limit", 20)
+    params = f"?limit={int(limit)}"
+    if idea_uid:
+        params += f"&idea_uid={idea_uid}"
     try:
-        post_resp = await async_http_post(
-            f"{server_url}/api/evaluations", payload, timeout=30,
-        )
+        result = await async_http_get(f"{server_url}/api/findings{params}", timeout=30)
     except Exception as e:
         return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": f"submit_failed: {e!r}",
+            "success": False, "error": f"get_failed: {e!r}",
         })}]}
-
-    eval_id = post_resp.get("evaluation_id")
-    if not eval_id:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": "no_evaluation_id_returned", "response": post_resp,
-        })}]}
-
-    # Poll. Hard timeout 4h.
-    poll_interval = 30
-    max_polls = (4 * 3600) // poll_interval
-    for _ in range(int(max_polls)):
-        try:
-            row = await async_http_get(
-                f"{server_url}/api/evaluations/{eval_id}", timeout=30,
-            )
-        except Exception:
-            await asyncio.sleep(poll_interval)
-            continue
-        status = row.get("status")
-        if status in ("done", "failed"):
-            return {"content": [{"type": "text", "text": json.dumps({
-                "success": status == "done",
-                "evaluation_id": eval_id,
-                **{k: v for k, v in row.items() if k != "evaluation_id"},
-            }, indent=2, default=str)}]}
-        await asyncio.sleep(poll_interval)
-
+    findings = result.get("findings") or []
+    compact = [
+        {
+            "finding_id": f.get("id"),
+            "idea_name": f.get("idea_name"),
+            "eval_status": f.get("eval_status"),
+            "pt_score": f.get("pt_score"),
+            "evaluation_id": f.get("evaluation_id"),
+            "created_at": f.get("created_at"),
+        }
+        for f in findings
+    ]
     return {"content": [{"type": "text", "text": json.dumps({
-        "success": False, "evaluation_id": eval_id,
-        "status": "running", "error": "tool_timeout",
-    })}]}
-
-
-@tool(
-    "list_my_evaluations",
-    "List all done evaluations submitted from this worker pod. Use this to find earlier "
-    "evaluation_ids you may want to reference in your finding summary.",
-    {},
-)
-async def list_my_evaluations(args: Dict[str, Any] = None) -> Dict[str, Any]:
-    """List this worker's prior evaluations."""
-    server_url = get_server_url()
-    experiment_id = os.environ.get("EXPERIMENT_ID")
-    if not experiment_id:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": "EXPERIMENT_ID env var not set",
-        })}]}
-    try:
-        result = await async_http_get(
-            f"{server_url}/api/evaluations?experiment_id={experiment_id}", timeout=30,
-        )
-    except Exception as e:
-        return {"content": [{"type": "text", "text": json.dumps({
-            "success": False, "error": f"list_failed: {e!r}",
-        })}]}
-    return {"content": [{"type": "text", "text": json.dumps({
-        "success": True,
-        "evaluations": result.get("evaluations", []),
-        "count": result.get("total", 0),
-    }, indent=2)}]}
+        "success": True, "findings": compact,
+    }, indent=2, default=str)}]}
 
 
 @tool(
@@ -442,8 +448,7 @@ def create_server_api_tools_server():
         version="1.0.0",
         tools=[
             share_finding,
-            submit_for_evaluation,
-            list_my_evaluations,
+            list_my_findings,
             get_leaderboard,
         ],
     )
